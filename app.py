@@ -797,7 +797,7 @@ def descargar_plantilla():
 # MAIN
 # -----------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 4050))
+    port = int(os.environ.get("PORT", 5001))
     log.info("Levantando Flask en 0.0.0.0:%s (debug=%s)", port, True)
     app.run(host="0.0.0.0", port=port, debug=True)
 
