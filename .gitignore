@@ -1,57 +1,78 @@
-# Python
+# Byte-compiled / cache
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
 
-# Entorno virtual
+# AI agent files
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.cursorrules
+.cursor/
+.aider*
+
+# Virtual environment
 venv/
-ENV/
+.env/
+.env.bak/
+.venv/
 env/
-.venv
 
-# Base de datos
+# Flask cache and instance data
+instance/
 *.db
-*.sqlite
 *.sqlite3
-scil.db
-
-# Archivos de subida
-uploads/
-*.xlsx
-!static/Plantilla.xlsx
-!catalogos/*.xlsx
-
-# Logs
+*.sqlite
 *.log
-logs/
+*.pid
+*.swp
 
-# Configuración local
-.env
-.env.local
-*.local
+# Environment variables
+*.env
+.env.*
+!.env.example
 
-# IDEs
+# OS junk
+.DS_Store
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# Editor / IDE
 .vscode/
 .idea/
-*.swp
-*.swo
-*~
-.DS_Store
+*.iml
+*.sublime-project
+*.sublime-workspace
 
-# Distribución
-dist/
+# Python packaging
 build/
+dist/
 *.egg-info/
 
-# Cobertura y testing
+# Backup files
+*~
+*.bak
+
+# Temporary files
+/tmp/
+temp/
+*.tmp
+
+# Test coverage
 .coverage
 htmlcov/
 .pytest_cache/
 
-# Certificados SSL (si se generan localmente)
-*.pem
-*.key
-*.crt
+# Logs
+gunicorn.log
+*.log.*
+logs/
 
+# System files
+*.sock
+*.pid
+
+# Cache or compiled static assets
+static/css/*.map
+static/js/*.map

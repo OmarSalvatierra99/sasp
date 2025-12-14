@@ -1,6 +1,6 @@
 # SCIL QNA 2025 — dependencias principales
 Flask==3.0.3
-Werkzeug==3.0.3
+Werkzeug==3.0.4
 itsdangerous==2.2.0
 Jinja2==3.1.4
 
@@ -18,7 +18,7 @@ requests==2.32.3
 python-dateutil==2.9.0.post0
 
 # Opcional (para despliegue con Gunicorn)
-gunicorn==23.0.0
+gunicorn==22.0.0
 
 # Opcional (si usas certbot o quieres automatizar HTTPS)
 certbot==3.0.0
