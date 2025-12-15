@@ -76,3 +76,9 @@ logs/
 # Cache or compiled static assets
 static/css/*.map
 static/js/*.map
+
+# Auto-added by master.py
+*.sqlite*
+*.sublime-*
+.env
+tmp/
