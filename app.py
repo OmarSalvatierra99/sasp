@@ -19,9 +19,19 @@ from core.data_processor import DataProcessor
 # -----------------------------------------------------------
 # Logging
 # -----------------------------------------------------------
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
+
+log_dir = Path('log')
+log_dir.mkdir(exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[
+        RotatingFileHandler('log/sasp.log', maxBytes=10*1024*1024, backupCount=10),
+        logging.StreamHandler()
+    ]
 )
 log = logging.getLogger("SCIL")
 
