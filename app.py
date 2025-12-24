@@ -12,14 +12,27 @@ import os
 import logging
 import pandas as pd
 from io import BytesIO
-from functools import lru_cache
-from core.database import DatabaseManager
-from core.data_processor import DataProcessor
+from scripts.utils import (
+    DataProcessor,
+    DatabaseManager,
+    ordenar_quincenas,
+    set_db_manager,
+    _allowed_all,
+    _construir_filas_export,
+    _ente_display,
+    _ente_match,
+    _ente_sigla,
+    _entes_cache,
+    _estatus_label,
+    _filtrar_duplicados_reales,
+    _sanitize_text,
+)
 
 # -----------------------------------------------------------
 # Logging
 # -----------------------------------------------------------
 from pathlib import Path
+import config
 from logging.handlers import RotatingFileHandler
 
 log_dir = Path('log')
@@ -29,7 +42,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     handlers=[
-        RotatingFileHandler('log/sasp.log', maxBytes=10*1024*1024, backupCount=10),
+        RotatingFileHandler('log/app.log', maxBytes=10*1024*1024, backupCount=10),
         logging.StreamHandler()
     ]
 )
@@ -43,6 +56,7 @@ app.secret_key = "ofs_sasp_2025"
 
 DB_PATH = os.environ.get("SCIL_DB", "scil.db")
 db_manager = DatabaseManager(DB_PATH)
+set_db_manager(db_manager)
 data_processor = DataProcessor()  # usa el mismo db_path por defecto
 
 log.info("Iniciando SCIL | CWD=%s | DB=%s", os.getcwd(), DB_PATH)
@@ -50,17 +64,7 @@ log.info("Iniciando SCIL | CWD=%s | DB=%s", os.getcwd(), DB_PATH)
 # -----------------------------------------------------------
 # Filtros de Jinja2
 # -----------------------------------------------------------
-@app.template_filter('ordenar_quincenas')
-def ordenar_quincenas(qnas):
-    """Ordena quincenas (QNA1, QNA2, ..., QNA24) numéricamente."""
-    import re
-    if not qnas:
-        return []
-    # Extraer número de cada QNA y ordenar
-    def extraer_numero(qna):
-        match = re.search(r'\d+', str(qna))
-        return int(match.group()) if match else 0
-    return sorted(qnas, key=extraer_numero)
+app.add_template_filter(ordenar_quincenas, "ordenar_quincenas")
 
 # -----------------------------------------------------------
 # Middleware
@@ -72,126 +76,6 @@ def verificar_autenticacion():
         if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
             return jsonify({"error": "Sesión expirada o no autorizada"}), 403
         return redirect(url_for("login"))
-
-# -----------------------------------------------------------
-# Utilidades
-# -----------------------------------------------------------
-def _sanitize_text(s):
-    return str(s or "").strip().upper()
-
-
-def _allowed_all(entes_usuario):
-    """
-    Devuelve:
-    - 'ALL'         → ENTES + MUNICIPIOS
-    - 'ENTES'       → Solo entes
-    - 'MUNICIPIOS'  → Solo municipios
-    - None          → Sin acceso especial
-    Analiza textos como:
-    - 'TODOS'
-    - 'TODOS LOS ENTES'
-    - 'TODOS LOS MUNICIPIOS'
-    """
-    tiene_todos = False
-    tiene_entes = False
-    tiene_munis = False
-
-    for e in entes_usuario:
-        s = _sanitize_text(e)
-        if s == "TODOS":
-            tiene_todos = True
-        if "TODOS" in s and "ENTE" in s:
-            tiene_entes = True
-        if "TODOS" in s and "MUNICIP" in s:
-            tiene_munis = True
-
-    if tiene_todos or (tiene_entes and tiene_munis):
-        return "ALL"
-    if tiene_entes:
-        return "ENTES"
-    if tiene_munis:
-        return "MUNICIPIOS"
-    return None
-
-
-def _estatus_label(v):
-    v = (v or "").strip().lower()
-    if not v:
-        return "Sin valoración"
-    if "no" in v:
-        return "No Solventado"
-    if "solvent" in v:
-        return "Solventado"
-    return "Sin valoración"
-
-
-@lru_cache(maxsize=1)
-def _entes_cache():
-    """
-    Devuelve diccionario unificado de ENTES + MUNICIPIOS:
-    { clave_normalizada: {siglas, nombre, tipo} }
-    """
-    conn = db_manager._connect()
-    cur = conn.cursor()
-
-    # Unificación: entes + municipios en un solo catálogo interno
-    cur.execute("""
-        SELECT clave, siglas, nombre, 'ENTE' AS tipo FROM entes
-        UNION ALL
-        SELECT clave, siglas, nombre, 'MUNICIPIO' AS tipo FROM municipios
-    """)
-
-    data = {}
-    for r in cur.fetchall():
-        clave = (r["clave"] or "").strip().upper()
-        data[clave] = {
-            "siglas": (r["siglas"] or "").strip().upper(),
-            "nombre": (r["nombre"] or "").strip().upper(),
-            "tipo": r["tipo"]  # 'ENTE' o 'MUNICIPIO'
-        }
-
-    conn.close()
-    return data
-
-
-def _ente_match(ente_usuario, clave_lista):
-    """
-    Permisos correctos:
-    - El usuario puede tener sigla (ACUAMANALA) y el registro tener clave (MUN_1)
-    - O nombre, o clave directamente.
-    """
-    euser = _sanitize_text(ente_usuario)
-
-    for c in clave_lista:
-        c_norm = _sanitize_text(c)
-
-        for k, d in _entes_cache().items():
-            # El usuario podría tener sigla, nombre o clave
-            if euser in {d["siglas"], d["nombre"], k}:
-                if c_norm in {d["siglas"], d["nombre"], k}:
-                    return True
-
-    return False
-
-
-def _ente_sigla(clave):
-    if not clave:
-        return ""
-    s = _sanitize_text(clave)
-    for k, d in _entes_cache().items():
-        if s in {k, d["siglas"], d["nombre"]}:
-            return d["siglas"] or d["nombre"] or s
-    return s
-
-
-def _ente_display(v):
-    if not v:
-        return "Sin Ente"
-    s = _sanitize_text(v)
-    for k, d in _entes_cache().items():
-        if s in {k, d["siglas"], d["nombre"]}:
-            return d["siglas"] or d["nombre"] or v
-    return v
 
 # -----------------------------------------------------------
 # LOGIN / LOGOUT
@@ -543,162 +427,6 @@ def actualizar_estado():
         return jsonify({"error": str(e)}), 500
 
 # -----------------------------------------------------------
-# UTIL: filtrar solo duplicados reales (con intersección de QNAs)
-# -----------------------------------------------------------
-def _filtrar_duplicados_reales(resultados):
-    """
-    Filtra resultados para incluir SOLO registros con duplicidad real:
-    - Mismos RFC en múltiples entes
-    - Con intersección de QNAs (mismo periodo activo en ambos entes)
-
-    Retorna: lista de resultados filtrados con entes_cruce_real agregado
-    """
-    resultados_filtrados = []
-
-    for r in resultados:
-        # Detectar si existe incompatibilidad real (misma QNA en más de un ente)
-        registros_rfc = r.get("registros", [])
-        qnas_por_ente = {}
-
-        for reg in registros_rfc:
-            ente = reg.get("ente")
-            qnas = set(reg.get("qnas", {}).keys())
-            qnas_por_ente[ente] = qnas
-
-        # Buscar intersección real
-        duplicidad_real = False
-        entes_cruce_real = set()
-
-        entes_lista = list(qnas_por_ente.keys())
-        for i in range(len(entes_lista)):
-            for j in range(i + 1, len(entes_lista)):
-                e1, e2 = entes_lista[i], entes_lista[j]
-                if qnas_por_ente[e1].intersection(qnas_por_ente[e2]):
-                    duplicidad_real = True
-                    entes_cruce_real.update([e1, e2])
-
-        # Si NO hay coincidencia real de QNAs, NO incluir
-        if not duplicidad_real:
-            continue
-
-        # Agregar información de entes con cruce real
-        r_filtrado = r.copy()
-        r_filtrado["entes_cruce_real"] = list(entes_cruce_real)
-        resultados_filtrados.append(r_filtrado)
-
-    return resultados_filtrados
-
-# -----------------------------------------------------------
-# UTIL: construir filas exportables
-# -----------------------------------------------------------
-def _construir_filas_export(resultados):
-    agregados = {}
-    for r in resultados:
-        entes_cruce = r.get("entes_cruce_real") or []
-        registros = r.get("registros") or []
-
-        # Pre-calcular QNAs por ente para este RFC
-        qnas_por_ente = {}
-        for reg in registros:
-            ente = reg.get("ente")
-            qnas = set(reg.get("qnas", {}).keys())
-            qnas_por_ente[ente] = qnas
-
-        for reg in registros:
-            ente_origen = reg.get("ente") or "Sin Ente"
-            key = (
-                r.get("rfc"),
-                _sanitize_text(ente_origen),
-                reg.get("puesto"),
-                reg.get("fecha_ingreso"),
-                reg.get("fecha_egreso"),
-                reg.get("monto"),
-            )
-
-            if key not in agregados:
-                agregados[key] = {
-                    "RFC": r.get("rfc"),
-                    "Nombre": r.get("nombre"),
-                    "Puesto": reg.get("puesto"),
-                    "Fecha Alta": reg.get("fecha_ingreso"),
-                    "Fecha Baja": reg.get("fecha_egreso"),
-                    "Total Percepciones": reg.get("monto"),
-                    "Ente Origen": _ente_display(ente_origen),
-                    "_ente_origen_raw": ente_origen,
-                    "_entes_incomp_set": set(),
-                    "_qnas_set": set(),
-                    "_estado_base": _estatus_label(r.get("estado")),
-                    "_solventacion": r.get("solventacion", "")
-                }
-
-            # CALCULAR SOLO LAS QNAS CON INTERSECCIÓN REAL
-            qnas_ente_actual = qnas_por_ente.get(ente_origen, set())
-
-            # Comparar con todos los otros entes y agregar solo las QNAs que se intersectan
-            for otro_ente, qnas_otro in qnas_por_ente.items():
-                if _sanitize_text(otro_ente) != _sanitize_text(ente_origen):
-                    # Calcular intersección
-                    interseccion = qnas_ente_actual.intersection(qnas_otro)
-                    if interseccion:
-                        # Agregar ente a la lista de incompatibilidades
-                        agregados[key]["_entes_incomp_set"].add(otro_ente)
-                        # Agregar solo las QNAs con intersección
-                        for qna in interseccion:
-                            qnum = qna.replace("QNA", "").strip()
-                            if qnum.isdigit():
-                                agregados[key]["_qnas_set"].add(int(qnum))
-
-    # === Cargar comentarios reales desde la tabla solventaciones ===
-    conn = db_manager._connect()
-    cur = conn.cursor()
-    cur.execute("SELECT rfc, ente, comentario FROM solventaciones")
-    comentarios = cur.fetchall()
-    conn.close()
-
-    mapa_coment = {
-        (c["rfc"], c["ente"]): c["comentario"]
-        for c in comentarios
-    }
-
-    # === Construir filas ===
-    filas = []
-    for key, item in agregados.items():
-        if len(item["_qnas_set"]) >= 24:
-            quincenas = "Activo en Todo el Ejercicio"
-        elif item["_qnas_set"]:
-
-            quincenas = ", ".join(f"QNA{q}" for q in sorted(item["_qnas_set"]))
-        else:
-            quincenas = "N/A"
-
-        entes_incomp = ", ".join(
-            sorted({_ente_sigla(e) for e in item["_entes_incomp_set"]})
-        ) or "Sin otros entes"
-
-        ente_clave = db_manager.normalizar_ente_clave(item["_ente_origen_raw"])
-        est_ente = db_manager.get_estado_rfc_ente(item["RFC"], ente_clave)
-        est_final = est_ente or item["_estado_base"]
-
-        # Comentario real (si existe en solventaciones)
-        comentario_real = mapa_coment.get((item["RFC"], ente_clave))
-        solventacion_final = comentario_real or item["_solventacion"]
-
-        filas.append({
-            "RFC": item["RFC"],
-            "Nombre": item["Nombre"],
-            "Puesto": item["Puesto"],
-            "Fecha Alta": item["Fecha Alta"],
-            "Fecha Baja": item["Fecha Baja"],
-            "Total Percepciones": item["Total Percepciones"],
-            "Ente Origen": item["Ente Origen"],
-            "Entes Incompatibilidad": entes_incomp,
-            "Quincenas": quincenas,
-            "Estatus": est_final,
-            "Solventación": solventacion_final
-        })
-    return filas
-
-# -----------------------------------------------------------
 # EXPORTAR POR ENTE (JSON + Excel)
 # -----------------------------------------------------------
 @app.route("/exportar_por_ente")
@@ -807,7 +535,6 @@ def descargar_plantilla():
 # MAIN
 # -----------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5006))
+    port = config.PORT
     log.info("Levantando Flask en 0.0.0.0:%s (debug=%s)", port, True)
     app.run(host="0.0.0.0", port=port, debug=True)
-

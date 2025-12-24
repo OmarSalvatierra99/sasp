@@ -1,13 +1,18 @@
 # ===========================================================
-# core/database.py — SCIL 2025
-# Manejador central de base de datos SQLite
+# scripts/utils.py — SCIL / SASP 2025
+# Utilidades y lógica auxiliar centralizada
 # ===========================================================
 
-import sqlite3
-import json
 import hashlib
-from pathlib import Path
+import json
+import re
+import sqlite3
 from collections import defaultdict
+from datetime import date, datetime
+from functools import lru_cache
+from pathlib import Path
+
+import pandas as pd
 
 
 class DatabaseManager:
@@ -663,10 +668,544 @@ class DatabaseManager:
         }
 
 
-# -----------------------------------------------------------
-# Ejecución directa
-# -----------------------------------------------------------
-if __name__ == "__main__":
-    db = DatabaseManager("scil.db")
-    db.poblar_datos_iniciales()
+class DataProcessor:
+    """
+    Procesador de archivos Excel laborales.
 
+    Funcionalidad principal:
+    - Lee archivos Excel con datos de empleados por ente público
+    - Detecta empleados activos en múltiples entes en la misma quincena
+    - Genera registros de cruces (duplicaciones) y empleados únicos
+    """
+
+    def __init__(self):
+        self.db = DatabaseManager("scil.db")
+        self.mapa_siglas = self.db.get_mapa_siglas()
+        self.mapa_inverso = self.db.get_mapa_claves_inverso()
+
+    # -------------------------------------------------------
+    # Limpieza y normalización
+    # -------------------------------------------------------
+    def limpiar_rfc(self, rfc):
+        if pd.isna(rfc):
+            return None
+        s = re.sub(r"[^A-Z0-9]", "", str(rfc).strip().upper())
+        return s if 10 <= len(s) <= 13 else None
+
+    def limpiar_fecha(self, fecha):
+        if pd.isna(fecha):
+            return None
+        if isinstance(fecha, (datetime, date)):
+            return fecha.strftime("%Y-%m-%d")
+        s = str(fecha).strip()
+        if s.lower() in {"", "nan", "nat", "none", "null"}:
+            return None
+        f = pd.to_datetime(s, errors="coerce", dayfirst=True)
+        return f.strftime("%Y-%m-%d") if not pd.isna(f) else None
+
+    def normalizar_ente_clave(self, etiqueta):
+        if not etiqueta:
+            return None
+        val = str(etiqueta).strip().upper()
+        if val in self.mapa_siglas:
+            return self.mapa_siglas[val]
+        return self.db.normalizar_ente_clave(val)
+
+    # -------------------------------------------------------
+    # Procesamiento principal
+    # -------------------------------------------------------
+    def extraer_registros_individuales(self, archivos):
+        """
+        Extrae TODOS los registros individuales (RFC+ENTE) sin procesar cruces.
+        Esto permite guardarlos/actualizarlos en la BD sin duplicar.
+
+        Returns:
+            (registros_individuales, alertas)
+        """
+        print(f"📊 Procesando {len(archivos)} archivo(s) laborales...")
+        registros = []
+        alertas = []
+
+        for f in archivos:
+            nombre_archivo = getattr(f, "filename", getattr(f, "name", "archivo.xlsx"))
+            print(f"📘 Leyendo archivo: {nombre_archivo}")
+            xl = pd.ExcelFile(f)
+
+            for hoja in xl.sheet_names:
+                ente_label = hoja.strip().upper()
+                clave_ente = self.normalizar_ente_clave(ente_label)
+
+                if not clave_ente:
+                    alerta = f"⚠️ Hoja '{hoja}' no encontrada en catálogo de entes. Verifique el nombre."
+                    print(alerta)
+                    alertas.append({
+                        "tipo": "ente_no_encontrado",
+                        "mensaje": alerta,
+                        "hoja": hoja,
+                        "archivo": nombre_archivo
+                    })
+                    continue
+
+                df = xl.parse(hoja).rename(columns=lambda x: str(x).strip().upper().replace(" ", "_"))
+                columnas_base = {"RFC", "NOMBRE", "PUESTO", "FECHA_ALTA", "FECHA_BAJA"}
+
+                if not columnas_base.issubset(df.columns):
+                    alerta = f"⚠️ Hoja '{hoja}' omitida: faltan columnas requeridas."
+                    print(alerta)
+                    alertas.append({
+                        "tipo": "columnas_faltantes",
+                        "mensaje": alerta,
+                        "hoja": hoja,
+                        "archivo": nombre_archivo
+                    })
+                    continue
+
+                qnas = [c for c in df.columns if re.match(r"^QNA([1-9]|1[0-9]|2[0-4])$", c)]
+                registros_validos = 0
+
+                for _, row in df.iterrows():
+                    rfc = self.limpiar_rfc(row.get("RFC"))
+                    if not rfc:
+                        continue
+
+                    qnas_activas = {q: row.get(q) for q in qnas if self._es_activo(row.get(q))}
+
+                    # Agregar registro individual
+                    registros.append({
+                        "rfc": rfc,
+                        "ente": clave_ente,
+                        "nombre": str(row.get("NOMBRE", "")).strip(),
+                        "puesto": str(row.get("PUESTO", "")).strip(),
+                        "fecha_ingreso": self.limpiar_fecha(row.get("FECHA_ALTA")),
+                        "fecha_egreso": self.limpiar_fecha(row.get("FECHA_BAJA")),
+                        "qnas": qnas_activas,
+                        "monto": row.get("TOT_PERC"),
+                    })
+                    registros_validos += 1
+
+                print(f"✅ Hoja '{hoja}': {registros_validos} registros procesados.")
+
+        print(f"📈 {len(registros)} registros individuales extraídos.")
+        return registros, alertas
+
+    def procesar_archivos(self, archivos):
+        print(f"📊 Procesando {len(archivos)} archivo(s) laborales...")
+        entes_rfc = defaultdict(list)
+        alertas = []
+
+        for f in archivos:
+            nombre_archivo = getattr(f, "filename", getattr(f, "name", "archivo.xlsx"))
+            print(f"📘 Leyendo archivo: {nombre_archivo}")
+            xl = pd.ExcelFile(f)
+
+            for hoja in xl.sheet_names:
+                ente_label = hoja.strip().upper()
+                clave_ente = self.normalizar_ente_clave(ente_label)
+
+                if not clave_ente:
+                    alerta = f"⚠️ Hoja '{hoja}' no encontrada en catálogo de entes. Verifique el nombre."
+                    print(alerta)
+                    alertas.append({
+                        "tipo": "ente_no_encontrado",
+                        "mensaje": alerta,
+                        "hoja": hoja,
+                        "archivo": nombre_archivo
+                    })
+                    continue
+
+                df = xl.parse(hoja).rename(columns=lambda x: str(x).strip().upper().replace(" ", "_"))
+                columnas_base = {"RFC", "NOMBRE", "PUESTO", "FECHA_ALTA", "FECHA_BAJA"}
+
+                if not columnas_base.issubset(df.columns):
+                    alerta = f"⚠️ Hoja '{hoja}' omitida: faltan columnas requeridas."
+                    print(alerta)
+                    alertas.append({
+                        "tipo": "columnas_faltantes",
+                        "mensaje": alerta,
+                        "hoja": hoja,
+                        "archivo": nombre_archivo
+                    })
+                    continue
+
+                qnas = [c for c in df.columns if re.match(r"^QNA([1-9]|1[0-9]|2[0-4])$", c)]
+                registros_validos = 0
+
+                for _, row in df.iterrows():
+                    rfc = self.limpiar_rfc(row.get("RFC"))
+                    if not rfc:
+                        continue
+
+                    qnas_activas = {q: row.get(q) for q in qnas if self._es_activo(row.get(q))}
+
+                    entes_rfc[rfc].append({
+                        "ente": clave_ente,
+                        "nombre": str(row.get("NOMBRE", "")).strip(),
+                        "puesto": str(row.get("PUESTO", "")).strip(),
+                        "fecha_ingreso": self.limpiar_fecha(row.get("FECHA_ALTA")),
+                        "fecha_egreso": self.limpiar_fecha(row.get("FECHA_BAJA")),
+                        "qnas": qnas_activas,
+                        "monto": row.get("TOT_PERC"),
+                    })
+                    registros_validos += 1
+
+                print(f"✅ Hoja '{hoja}': {registros_validos} registros procesados.")
+
+        resultados = self._cruces_quincenales(entes_rfc)
+        sin_cruce = self._empleados_sin_cruce(entes_rfc, resultados)
+        resultados.extend(sin_cruce)
+
+        print(f"📈 {len(resultados)} registros totales (incluye no duplicados).")
+        return resultados, alertas
+
+    # -------------------------------------------------------
+    # Empleados sin cruce
+    # -------------------------------------------------------
+    def _empleados_sin_cruce(self, entes_rfc, hallazgos):
+        hallados = {h["rfc"] for h in hallazgos}
+        faltantes = []
+        for rfc, registros in entes_rfc.items():
+            if rfc in hallados:
+                continue
+            faltantes.append({
+                "rfc": rfc,
+                "nombre": registros[0].get("nombre", ""),
+                "entes": sorted({r["ente"] for r in registros}),
+                "tipo_patron": "SIN_DUPLICIDAD",
+                "descripcion": "Empleado sin cruce detectado",
+                "registros": registros,
+                "estado": "Sin valoración",
+                "solventacion": ""
+            })
+        return faltantes
+
+    # -------------------------------------------------------
+    # Cruces: VERSIÓN CORREGIDA
+    # -------------------------------------------------------
+    def _es_activo(self, valor):
+        if pd.isna(valor):
+            return False
+        s = str(valor).strip().upper()
+        return s not in {"", "0", "0.0", "NO", "N/A", "NA", "NONE"}
+
+    def _cruces_quincenales(self, entes_rfc):
+        hallazgos = []
+        año_actual = datetime.now().year
+
+        for rfc, registros in entes_rfc.items():
+            # Verificar si hay al menos 2 registros (diferentes entes)
+            if len(registros) < 2:
+                continue
+
+            # Mapear QNAs por ente para detectar cruces
+            qna_map = defaultdict(list)
+
+            for reg in registros:
+                for qna, valor in reg["qnas"].items():
+                    if self._es_activo(valor):
+                        qna_map[qna].append(reg)
+
+            # Verificar si hay al menos una QNA con cruce real (2+ entes)
+            qnas_con_cruce = []
+            entes_involucrados = set()
+
+            for qna, regs_activos in qna_map.items():
+                entes_en_qna = {r["ente"] for r in regs_activos}
+                if len(entes_en_qna) > 1:
+                    qnas_con_cruce.append(qna)
+                    entes_involucrados.update(entes_en_qna)
+
+            # Si NO hay cruces reales, saltar este RFC
+            if not qnas_con_cruce:
+                continue
+
+            # Crear UN SOLO hallazgo consolidado para este RFC
+            # Incluir todos los entes involucrados en cualquier cruce
+            entes_list = sorted(list(entes_involucrados))
+
+            hallazgos.append({
+                "rfc": rfc,
+                "nombre": registros[0].get("nombre", ""),
+                "entes": entes_list,
+                "qnas_cruce": sorted(qnas_con_cruce),  # Lista de QNAs con cruce
+                "tipo_patron": "CRUCE_ENTRE_ENTES_QNA",
+                "descripcion": f"Activo en {len(entes_list)} entes durante {len(qnas_con_cruce)} quincena(s) simultáneas.",
+                "registros": registros,  # TODOS los registros del RFC
+                "estado": "Sin valoración",
+                "solventacion": ""
+            })
+
+        return hallazgos
+
+
+_db_manager = None
+
+
+def set_db_manager(db_manager):
+    global _db_manager
+    _db_manager = db_manager
+    _entes_cache.cache_clear()
+
+
+def ordenar_quincenas(qnas):
+    """Ordena quincenas (QNA1, QNA2, ..., QNA24) numéricamente."""
+    if not qnas:
+        return []
+
+    def extraer_numero(qna):
+        match = re.search(r"\d+", str(qna))
+        return int(match.group()) if match else 0
+
+    return sorted(qnas, key=extraer_numero)
+
+
+def _sanitize_text(s):
+    return str(s or "").strip().upper()
+
+
+def _allowed_all(entes_usuario):
+    """
+    Devuelve:
+    - 'ALL'         → ENTES + MUNICIPIOS
+    - 'ENTES'       → Solo entes
+    - 'MUNICIPIOS'  → Solo municipios
+    - None          → Sin acceso especial
+    """
+    tiene_todos = False
+    tiene_entes = False
+    tiene_munis = False
+
+    for e in entes_usuario:
+        s = _sanitize_text(e)
+        if s == "TODOS":
+            tiene_todos = True
+        if "TODOS" in s and "ENTE" in s:
+            tiene_entes = True
+        if "TODOS" in s and "MUNICIP" in s:
+            tiene_munis = True
+
+    if tiene_todos or (tiene_entes and tiene_munis):
+        return "ALL"
+    if tiene_entes:
+        return "ENTES"
+    if tiene_munis:
+        return "MUNICIPIOS"
+    return None
+
+
+def _estatus_label(v):
+    v = (v or "").strip().lower()
+    if not v:
+        return "Sin valoración"
+    if "no" in v:
+        return "No Solventado"
+    if "solvent" in v:
+        return "Solventado"
+    return "Sin valoración"
+
+
+@lru_cache(maxsize=1)
+def _entes_cache():
+    """
+    Devuelve diccionario unificado de ENTES + MUNICIPIOS:
+    { clave_normalizada: {siglas, nombre, tipo} }
+    """
+    if _db_manager is None:
+        raise RuntimeError("Database manager not set")
+
+    conn = _db_manager._connect()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT clave, siglas, nombre, 'ENTE' AS tipo FROM entes
+        UNION ALL
+        SELECT clave, siglas, nombre, 'MUNICIPIO' AS tipo FROM municipios
+    """)
+
+    data = {}
+    for r in cur.fetchall():
+        clave = (r["clave"] or "").strip().upper()
+        data[clave] = {
+            "siglas": (r["siglas"] or "").strip().upper(),
+            "nombre": (r["nombre"] or "").strip().upper(),
+            "tipo": r["tipo"]
+        }
+
+    conn.close()
+    return data
+
+
+def _ente_match(ente_usuario, clave_lista):
+    """
+    Permisos correctos:
+    - El usuario puede tener sigla (ACUAMANALA) y el registro tener clave (MUN_1)
+    - O nombre, o clave directamente.
+    """
+    euser = _sanitize_text(ente_usuario)
+
+    for c in clave_lista:
+        c_norm = _sanitize_text(c)
+
+        for k, d in _entes_cache().items():
+            if euser in {d["siglas"], d["nombre"], k}:
+                if c_norm in {d["siglas"], d["nombre"], k}:
+                    return True
+
+    return False
+
+
+def _ente_sigla(clave):
+    if not clave:
+        return ""
+    s = _sanitize_text(clave)
+    for k, d in _entes_cache().items():
+        if s in {k, d["siglas"], d["nombre"]}:
+            return d["siglas"] or d["nombre"] or s
+    return s
+
+
+def _ente_display(v):
+    if not v:
+        return "Sin Ente"
+    s = _sanitize_text(v)
+    for k, d in _entes_cache().items():
+        if s in {k, d["siglas"], d["nombre"]}:
+            return d["siglas"] or d["nombre"] or v
+    return v
+
+
+def _filtrar_duplicados_reales(resultados):
+    """
+    Filtra resultados para incluir SOLO registros con duplicidad real:
+    - Mismos RFC en múltiples entes
+    - Con intersección de QNAs (mismo periodo activo en ambos entes)
+    """
+    resultados_filtrados = []
+
+    for r in resultados:
+        registros_rfc = r.get("registros", [])
+        qnas_por_ente = {}
+
+        for reg in registros_rfc:
+            ente = reg.get("ente")
+            qnas = set(reg.get("qnas", {}).keys())
+            qnas_por_ente[ente] = qnas
+
+        duplicidad_real = False
+        entes_cruce_real = set()
+
+        entes_lista = list(qnas_por_ente.keys())
+        for i in range(len(entes_lista)):
+            for j in range(i + 1, len(entes_lista)):
+                e1, e2 = entes_lista[i], entes_lista[j]
+                if qnas_por_ente[e1].intersection(qnas_por_ente[e2]):
+                    duplicidad_real = True
+                    entes_cruce_real.update([e1, e2])
+
+        if not duplicidad_real:
+            continue
+
+        r_filtrado = r.copy()
+        r_filtrado["entes_cruce_real"] = list(entes_cruce_real)
+        resultados_filtrados.append(r_filtrado)
+
+    return resultados_filtrados
+
+
+def _construir_filas_export(resultados):
+    if _db_manager is None:
+        raise RuntimeError("Database manager not set")
+
+    agregados = {}
+    for r in resultados:
+        registros = r.get("registros") or []
+
+        qnas_por_ente = {}
+        for reg in registros:
+            ente = reg.get("ente")
+            qnas = set(reg.get("qnas", {}).keys())
+            qnas_por_ente[ente] = qnas
+
+        for reg in registros:
+            ente_origen = reg.get("ente") or "Sin Ente"
+            key = (
+                r.get("rfc"),
+                _sanitize_text(ente_origen),
+                reg.get("puesto"),
+                reg.get("fecha_ingreso"),
+                reg.get("fecha_egreso"),
+                reg.get("monto"),
+            )
+
+            if key not in agregados:
+                agregados[key] = {
+                    "RFC": r.get("rfc"),
+                    "Nombre": r.get("nombre"),
+                    "Puesto": reg.get("puesto"),
+                    "Fecha Alta": reg.get("fecha_ingreso"),
+                    "Fecha Baja": reg.get("fecha_egreso"),
+                    "Total Percepciones": reg.get("monto"),
+                    "Ente Origen": _ente_display(ente_origen),
+                    "_ente_origen_raw": ente_origen,
+                    "_entes_incomp_set": set(),
+                    "_qnas_set": set(),
+                    "_estado_base": _estatus_label(r.get("estado")),
+                    "_solventacion": r.get("solventacion", "")
+                }
+
+            qnas_ente_actual = qnas_por_ente.get(ente_origen, set())
+
+            for otro_ente, qnas_otro in qnas_por_ente.items():
+                if _sanitize_text(otro_ente) != _sanitize_text(ente_origen):
+                    interseccion = qnas_ente_actual.intersection(qnas_otro)
+                    if interseccion:
+                        agregados[key]["_entes_incomp_set"].add(otro_ente)
+                        for qna in interseccion:
+                            qnum = qna.replace("QNA", "").strip()
+                            if qnum.isdigit():
+                                agregados[key]["_qnas_set"].add(int(qnum))
+
+    conn = _db_manager._connect()
+    cur = conn.cursor()
+    cur.execute("SELECT rfc, ente, comentario FROM solventaciones")
+    comentarios = cur.fetchall()
+    conn.close()
+
+    mapa_coment = {
+        (c["rfc"], c["ente"]): c["comentario"]
+        for c in comentarios
+    }
+
+    filas = []
+    for key, item in agregados.items():
+        if len(item["_qnas_set"]) >= 24:
+            quincenas = "Activo en Todo el Ejercicio"
+        elif item["_qnas_set"]:
+            quincenas = ", ".join(f"QNA{q}" for q in sorted(item["_qnas_set"]))
+        else:
+            quincenas = "N/A"
+
+        entes_incomp = ", ".join(
+            sorted({_ente_sigla(e) for e in item["_entes_incomp_set"]})
+        ) or "Sin otros entes"
+
+        ente_clave = _db_manager.normalizar_ente_clave(item["_ente_origen_raw"])
+        est_ente = _db_manager.get_estado_rfc_ente(item["RFC"], ente_clave)
+        est_final = est_ente or item["_estado_base"]
+
+        comentario_real = mapa_coment.get((item["RFC"], ente_clave))
+        solventacion_final = comentario_real or item["_solventacion"]
+
+        filas.append({
+            "RFC": item["RFC"],
+            "Nombre": item["Nombre"],
+            "Puesto": item["Puesto"],
+            "Fecha Alta": item["Fecha Alta"],
+            "Fecha Baja": item["Fecha Baja"],
+            "Total Percepciones": item["Total Percepciones"],
+            "Ente Origen": item["Ente Origen"],
+            "Entes Incompatibilidad": entes_incomp,
+            "Quincenas": quincenas,
+            "Estatus": est_final,
+            "Solventación": solventacion_final
+        })
+    return filas
