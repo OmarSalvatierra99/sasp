@@ -1,25 +1,3 @@
-# SCIL QNA 2025 — dependencias principales
-Flask==3.0.3
-Werkzeug==3.0.4
-itsdangerous==2.2.0
-Jinja2==3.1.4
-
-# Procesamiento de datos
-pandas==2.2.3
-openpyxl==3.1.5
-numpy==2.1.2
-
-# Base de datos SQLite (estándar, viene en Python)
-# Solo si quieres manejar conexiones avanzadas puedes añadir:
-sqlalchemy==2.0.35
-
-# Utilidades
-requests==2.32.3
-python-dateutil==2.9.0.post0
-
-# Opcional (para despliegue con Gunicorn)
-gunicorn==22.0.0
-
-# Opcional (si usas certbot o quieres automatizar HTTPS)
-certbot==3.0.0
-
+Flask
+pandas
+openpyxl

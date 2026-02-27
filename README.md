@@ -1,13 +1,18 @@
-# SASP
+# SASP — Personnel Services Audit
 
-Flask application for SASP/SCIL 2025.
+SASP organizes audits for personnel services with clear tracking and follow-up.
+SASP organiza auditorias de servicios personales con seguimiento claro.
 
-## Quick Start
-1. `python -m venv venv`
-2. `source venv/bin/activate`
-3. `pip install -r requirements.txt`
-4. `python app.py`
+🔗 **Live / En vivo:** https://sasp.omar-xyz.shop
+🌐 **Language / Idioma:** English / Espanol
 
-## Configuration
-- `PORT` controls the Flask port (default: `5006`).
-- `SCIL_DB` overrides the SQLite database path (default: `scil.db`).
+---
+
+## Highlights / Lo mas importante
+- Register audits and follow-up items / Registrar auditorias y dar seguimiento
+- Organize evidence and observations / Organizar evidencias y observaciones
+- Export summaries for reporting / Exportar resumenes para reportes
+
+---
+
+© 2026 Omar Gabriel Salvatierra Garcia

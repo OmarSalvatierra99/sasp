@@ -14,6 +14,34 @@ from pathlib import Path
 
 import pandas as pd
 
+_ENTE_ALIAS_MAP = {
+    "SM": "SMYT",
+    "SMYT": "SMYT",
+    "SEFIN": "SF",
+    "SF": "SF",
+    "SOTYV": "SOTYV",
+    "SECRETARIADEMOVILIDADYTRANSPORTE": "SMYT",
+    "SECRETARIADEORDENAMIENTOTERRITORIALYVIVIENDA": "SOTYV",
+    "SECRETARIADEFINANZAS": "SF",
+}
+
+
+def _strip_accents_upper(s):
+    out = str(s or "").strip().upper()
+    for a, b in zip("ÁÉÍÓÚ", "AEIOU"):
+        out = out.replace(a, b)
+    return out
+
+
+def _normalize_ente_alias(s):
+    text = _strip_accents_upper(s)
+    compact = re.sub(r"[^A-Z0-9]", "", text)
+    if text in _ENTE_ALIAS_MAP:
+        return _ENTE_ALIAS_MAP[text]
+    if compact in _ENTE_ALIAS_MAP:
+        return _ENTE_ALIAS_MAP[compact]
+    return text
+
 
 class DatabaseManager:
     def __init__(self, db_path="scil.db"):
@@ -80,6 +108,43 @@ class DatabaseManager:
                 entes TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS workflow_estado (
+                clave TEXT PRIMARY KEY,
+                valor TEXT NOT NULL,
+                actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                actualizado_por TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS prevalidaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rfc TEXT NOT NULL,
+                ente TEXT NOT NULL,
+                estado TEXT NOT NULL DEFAULT 'Sin valoración',
+                comentario TEXT,
+                catalogo TEXT,
+                otro_texto TEXT,
+                actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                usuario TEXT,
+                UNIQUE(rfc, ente)
+            );
+
+            CREATE TABLE IF NOT EXISTS prevalidaciones_historial (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rfc TEXT NOT NULL,
+                ente TEXT NOT NULL,
+                estado_anterior TEXT,
+                comentario_anterior TEXT,
+                catalogo_anterior TEXT,
+                otro_texto_anterior TEXT,
+                estado_nuevo TEXT,
+                comentario_nuevo TEXT,
+                catalogo_nuevo TEXT,
+                otro_texto_nuevo TEXT,
+                accion TEXT NOT NULL DEFAULT 'actualizacion',
+                usuario TEXT,
+                creado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             CREATE TABLE IF NOT EXISTS entes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 num TEXT NOT NULL,
@@ -108,6 +173,9 @@ class DatabaseManager:
 
         # Migrar columnas nuevas en solventaciones si no existen
         self._migrate_solventaciones_columns(cur)
+        self._migrate_workflow_defaults(cur)
+        self._migrate_entes_siglas(cur)
+        self._migrate_catalogos_mayusculas(cur)
 
         conn.commit()
         conn.close()
@@ -126,6 +194,43 @@ class DatabaseManager:
         if 'otro_texto' not in columns:
             cur.execute("ALTER TABLE solventaciones ADD COLUMN otro_texto TEXT")
             print("  ↳ Columna 'otro_texto' agregada a solventaciones")
+
+    def _migrate_workflow_defaults(self, cur):
+        """Inicializa el estado global de validación si no existe."""
+        cur.execute("""
+            INSERT OR IGNORE INTO workflow_estado (clave, valor, actualizado_por)
+            VALUES ('validacion_resultados', 'borrador', 'SISTEMA')
+        """)
+
+    def _migrate_entes_siglas(self, cur):
+        """Normaliza siglas oficiales de entes en instalaciones existentes."""
+        cur.execute("UPDATE entes SET siglas='SMyT' WHERE UPPER(siglas)='SM'")
+        cur.execute("UPDATE entes SET siglas='SF' WHERE UPPER(siglas)='SEFIN'")
+
+    def _migrate_catalogos_mayusculas(self, cur):
+        """Normaliza a mayúsculas nombre/siglas/clasificación en entes y municipios."""
+        for tabla in ("entes", "municipios"):
+            cur.execute(f"SELECT id, nombre, siglas, clasificacion FROM {tabla}")
+            updates = []
+            for row in cur.fetchall():
+                nombre = (row["nombre"] or "").strip().upper()
+                siglas = (row["siglas"] or "").strip().upper()
+                clasificacion = (row["clasificacion"] or "").strip().upper()
+                if (
+                    nombre != (row["nombre"] or "")
+                    or siglas != (row["siglas"] or "")
+                    or clasificacion != (row["clasificacion"] or "")
+                ):
+                    updates.append((nombre, siglas, clasificacion, row["id"]))
+            if updates:
+                cur.executemany(
+                    f"""
+                    UPDATE {tabla}
+                    SET nombre=?, siglas=?, clasificacion=?
+                    WHERE id=?
+                    """,
+                    updates
+                )
 
     # -------------------------------------------------------
     # Poblar datos base
@@ -149,9 +254,9 @@ class DatabaseManager:
         cur.execute("SELECT COUNT(*) FROM entes")
         if cur.fetchone()[0] == 0:
             entes = [
-                ("1.2", "ENTE_1_2", "Secretaría de Gobierno", "SEGOB", "Dependencia", "Estatal"),
-                ("1.4", "ENTE_1_4", "Secretaría de Finanzas", "SEFIN", "Dependencia", "Estatal"),
-                ("1.8", "ENTE_1_8", "Secretaría de Educación Pública", "SEPE", "Dependencia", "Estatal"),
+                ("1.2", "ENTE_1_2", "SECRETARÍA DE GOBIERNO", "SEGOB", "DEPENDENCIA", "ESTATAL"),
+                ("1.4", "ENTE_1_4", "SECRETARÍA DE FINANZAS", "SF", "DEPENDENCIA", "ESTATAL"),
+                ("1.8", "ENTE_1_8", "SECRETARÍA DE EDUCACIÓN PÚBLICA", "SEPE", "DEPENDENCIA", "ESTATAL"),
             ]
             cur.executemany(
                 "INSERT INTO entes (num, clave, nombre, siglas, clasificacion, ambito) VALUES (?,?,?,?,?,?)", entes)
@@ -243,12 +348,7 @@ class DatabaseManager:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _sanitize(self, s):
-        if not s:
-            return ""
-        s = str(s).strip().upper()
-        for a, b in zip("ÁÉÍÓÚ", "AEIOU"):
-            s = s.replace(a, b)
-        return s
+        return _normalize_ente_alias(s)
 
     # -------------------------------------------------------
     # Normalización de entes
@@ -260,6 +360,24 @@ class DatabaseManager:
         """
         if not valor:
             return None
+        clave = self.normalizar_ente_clave(valor)
+        if clave:
+            conn = self._connect()
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT nombre FROM (
+                    SELECT clave, nombre FROM entes WHERE activo=1
+                    UNION ALL
+                    SELECT clave, nombre FROM municipios WHERE activo=1
+                )
+                WHERE UPPER(clave)=UPPER(?)
+                LIMIT 1
+            """, (clave,))
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                return row[0]
+
         conn = self._connect()
         cur = conn.cursor()
         cur.execute("""
@@ -285,18 +403,38 @@ class DatabaseManager:
         val = self._sanitize(valor)
         conn = self._connect()
         cur = conn.cursor()
+
+        # Resolver por equivalencias primero (SM/SMyT/SMYT, SEFIN/SF, SOTYV, etc.)
         cur.execute("""
-            SELECT clave FROM (
+            SELECT clave, siglas, nombre FROM (
                 SELECT clave, siglas, nombre FROM entes WHERE activo=1
                 UNION ALL
                 SELECT clave, siglas, nombre FROM municipios WHERE activo=1
             )
-            WHERE UPPER(siglas)=? OR UPPER(nombre)=? OR UPPER(clave)=?
-            LIMIT 1
-        """, (val, val, val))
-        row = cur.fetchone()
+        """)
+        row = None
+        for cand in cur.fetchall():
+            cand_clave = self._sanitize(cand["clave"])
+            cand_sigla = self._sanitize(cand["siglas"])
+            cand_nombre = self._sanitize(cand["nombre"])
+            if val in {cand_clave, cand_sigla, cand_nombre}:
+                row = cand
+                break
+
+        # Fallback exacto por SQL para conservar comportamiento previo
+        if row is None:
+            cur.execute("""
+                SELECT clave FROM (
+                    SELECT clave, siglas, nombre FROM entes WHERE activo=1
+                    UNION ALL
+                    SELECT clave, siglas, nombre FROM municipios WHERE activo=1
+                )
+                WHERE UPPER(siglas)=UPPER(?) OR UPPER(nombre)=UPPER(?) OR UPPER(clave)=UPPER(?)
+                LIMIT 1
+            """, (valor, valor, valor))
+            row = cur.fetchone()
         conn.close()
-        return row[0] if row else None
+        return row["clave"] if row else None
 
     # -------------------------------------------------------
     # Resultados laborales
@@ -411,6 +549,42 @@ class DatabaseManager:
         resultado = {}
         for row in cur.fetchall():
             resultado[row["ente"]] = row["total"]
+
+        conn.close()
+        return resultado
+
+    def obtener_trabajadores_por_ente(self):
+        """Obtiene trabajadores agrupados por ente para vistas de auditoría."""
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ente, rfc, nombre, puesto, fecha_ingreso, fecha_egreso, monto, qnas
+            FROM registros_laborales
+            ORDER BY ente, nombre, rfc
+        """)
+
+        resultado = {}
+        for row in cur.fetchall():
+            ente = (row["ente"] or "").strip()
+            if not ente:
+                continue
+
+            try:
+                qnas = json.loads(row["qnas"] or "{}")
+                if not isinstance(qnas, dict):
+                    qnas = {}
+            except Exception:
+                qnas = {}
+
+            resultado.setdefault(ente, []).append({
+                "rfc": row["rfc"] or "",
+                "nombre": row["nombre"] or "",
+                "puesto": row["puesto"] or "",
+                "fecha_ingreso": row["fecha_ingreso"],
+                "fecha_egreso": row["fecha_egreso"],
+                "monto": row["monto"],
+                "qnas": qnas
+            })
 
         conn.close()
         return resultado
@@ -585,6 +759,49 @@ class DatabaseManager:
             "solventacion": ""
         }
 
+    def obtener_entes_con_cruce_por_rfc(self, rfc):
+        """Obtiene entes de un RFC con cruce real de QNAs entre sí."""
+        rfc = (rfc or "").strip().upper()
+        if not rfc:
+            return []
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ente, qnas
+            FROM registros_laborales
+            WHERE UPPER(rfc) = UPPER(?)
+            ORDER BY ente
+        """, (rfc,))
+        rows = cur.fetchall()
+        conn.close()
+
+        if len(rows) < 2:
+            return []
+
+        qnas_por_ente = {}
+        for row in rows:
+            ente = (row["ente"] or "").strip()
+            if not ente:
+                continue
+            try:
+                qnas = json.loads(row["qnas"] or "{}")
+                if not isinstance(qnas, dict):
+                    qnas = {}
+            except Exception:
+                qnas = {}
+            qnas_por_ente[ente] = set(qnas.keys())
+
+        entes = list(qnas_por_ente.keys())
+        entes_con_cruce = set()
+        for i in range(len(entes)):
+            for j in range(i + 1, len(entes)):
+                e1, e2 = entes[i], entes[j]
+                if qnas_por_ente[e1].intersection(qnas_por_ente[e2]):
+                    entes_con_cruce.update([e1, e2])
+
+        return sorted(list(entes_con_cruce))
+
     # -------------------------------------------------------
     # Solventaciones
     # -------------------------------------------------------
@@ -598,6 +815,34 @@ class DatabaseManager:
                 "estado": row["estado"],
                 "comentario": row["comentario"]
             }
+        conn.close()
+        return data
+
+    def get_solventaciones_por_rfcs(self, rfcs):
+        rfcs = [str(r).strip().upper() for r in (rfcs or []) if str(r).strip()]
+        if not rfcs:
+            return {}
+
+        conn = self._connect()
+        cur = conn.cursor()
+        placeholders = ",".join(["?"] * len(rfcs))
+        cur.execute(f"""
+            SELECT rfc, ente, estado, comentario
+            FROM solventaciones
+            WHERE UPPER(rfc) IN ({placeholders})
+        """, rfcs)
+
+        data = {}
+        for row in cur.fetchall():
+            rfc = (row["rfc"] or "").strip().upper()
+            ente = row["ente"] or ""
+            if not rfc or not ente:
+                continue
+            data.setdefault(rfc, {})[ente] = {
+                "estado": row["estado"] or "Sin valoración",
+                "comentario": row["comentario"] or ""
+            }
+
         conn.close()
         return data
 
@@ -639,6 +884,163 @@ class DatabaseManager:
         row = cur.fetchone()
         conn.close()
         return row[0] if row else None
+
+    def guardar_prevalidacion_duplicado(
+        self,
+        rfc,
+        ente,
+        estado,
+        comentario="",
+        catalogo="",
+        otro_texto="",
+        usuario="luis",
+    ):
+        estado = estado or "Sin valoración"
+        ente_norm = self.normalizar_ente_clave(ente) or ente
+
+        conn = self._connect()
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT estado, comentario, catalogo, otro_texto
+            FROM prevalidaciones
+            WHERE rfc=? AND ente=?
+            LIMIT 1
+        """, (rfc, ente_norm))
+        prev = cur.fetchone()
+
+        cur.execute("""
+            INSERT INTO prevalidaciones
+                (rfc, ente, estado, comentario, catalogo, otro_texto, actualizado, usuario)
+            VALUES
+                (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(rfc, ente) DO UPDATE SET
+                estado=excluded.estado,
+                comentario=excluded.comentario,
+                catalogo=excluded.catalogo,
+                otro_texto=excluded.otro_texto,
+                actualizado=CURRENT_TIMESTAMP,
+                usuario=excluded.usuario
+        """, (rfc, ente_norm, estado, comentario, catalogo, otro_texto, usuario))
+
+        cur.execute("""
+            INSERT INTO prevalidaciones_historial
+                (rfc, ente,
+                 estado_anterior, comentario_anterior, catalogo_anterior, otro_texto_anterior,
+                 estado_nuevo, comentario_nuevo, catalogo_nuevo, otro_texto_nuevo,
+                 accion, usuario)
+            VALUES
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            rfc,
+            ente_norm,
+            prev["estado"] if prev else None,
+            prev["comentario"] if prev else None,
+            prev["catalogo"] if prev else None,
+            prev["otro_texto"] if prev else None,
+            estado,
+            comentario,
+            catalogo,
+            otro_texto,
+            "cancelar_solventacion" if estado == "Sin valoración" else "solventar",
+            usuario,
+        ))
+
+        filas = cur.rowcount
+        conn.commit()
+        conn.close()
+        return filas
+
+    def get_prevalidaciones_por_rfc(self, rfc):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ente, estado, comentario, catalogo, otro_texto
+            FROM prevalidaciones
+            WHERE rfc=?
+        """, (rfc,))
+        data = {}
+        for row in cur.fetchall():
+            data[row["ente"]] = {
+                "estado": row["estado"] or "Sin valoración",
+                "comentario": row["comentario"] or "",
+                "catalogo": row["catalogo"] or "",
+                "otro_texto": row["otro_texto"] or "",
+            }
+        conn.close()
+        return data
+
+    def get_prevalidaciones_por_rfcs(self, rfcs):
+        rfcs = [str(r).strip().upper() for r in (rfcs or []) if str(r).strip()]
+        if not rfcs:
+            return {}
+
+        conn = self._connect()
+        cur = conn.cursor()
+        placeholders = ",".join(["?"] * len(rfcs))
+        cur.execute(f"""
+            SELECT rfc, ente, estado, comentario, catalogo, otro_texto
+            FROM prevalidaciones
+            WHERE UPPER(rfc) IN ({placeholders})
+        """, rfcs)
+
+        data = {}
+        for row in cur.fetchall():
+            rfc = (row["rfc"] or "").strip().upper()
+            ente = row["ente"] or ""
+            if not rfc or not ente:
+                continue
+            data.setdefault(rfc, {})[ente] = {
+                "estado": row["estado"] or "Sin valoración",
+                "comentario": row["comentario"] or "",
+                "catalogo": row["catalogo"] or "",
+                "otro_texto": row["otro_texto"] or "",
+            }
+
+        conn.close()
+        return data
+
+    def resultados_validados(self):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT valor
+            FROM workflow_estado
+            WHERE clave='validacion_resultados'
+            LIMIT 1
+        """)
+        row = cur.fetchone()
+        conn.close()
+        valor = (row["valor"] if row else "borrador") or "borrador"
+        return str(valor).strip().lower() == "validados"
+
+    def marcar_resultados_validados(self, usuario="luis"):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO workflow_estado (clave, valor, actualizado_por)
+            VALUES ('validacion_resultados', 'validados', ?)
+            ON CONFLICT(clave) DO UPDATE SET
+                valor='validados',
+                actualizado=CURRENT_TIMESTAMP,
+                actualizado_por=excluded.actualizado_por
+        """, (usuario,))
+        conn.commit()
+        conn.close()
+
+    def desmarcar_resultados_validados(self, usuario="luis"):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO workflow_estado (clave, valor, actualizado_por)
+            VALUES ('validacion_resultados', 'borrador', ?)
+            ON CONFLICT(clave) DO UPDATE SET
+                valor='borrador',
+                actualizado=CURRENT_TIMESTAMP,
+                actualizado_por=excluded.actualizado_por
+        """, (usuario,))
+        conn.commit()
+        conn.close()
 
     def get_usuario(self, usuario, clave):
         if not usuario or not clave:
@@ -706,7 +1108,7 @@ class DataProcessor:
     def normalizar_ente_clave(self, etiqueta):
         if not etiqueta:
             return None
-        val = str(etiqueta).strip().upper()
+        val = _normalize_ente_alias(etiqueta)
         if val in self.mapa_siglas:
             return self.mapa_siglas[val]
         return self.db.normalizar_ente_clave(val)
@@ -959,7 +1361,7 @@ def ordenar_quincenas(qnas):
 
 
 def _sanitize_text(s):
-    return str(s or "").strip().upper()
+    return _normalize_ente_alias(s)
 
 
 def _allowed_all(entes_usuario):
@@ -1023,10 +1425,10 @@ def _entes_cache():
 
     data = {}
     for r in cur.fetchall():
-        clave = (r["clave"] or "").strip().upper()
+        clave = _sanitize_text(r["clave"])
         data[clave] = {
-            "siglas": (r["siglas"] or "").strip().upper(),
-            "nombre": (r["nombre"] or "").strip().upper(),
+            "siglas": _sanitize_text(r["siglas"]),
+            "nombre": _sanitize_text(r["nombre"]),
             "tipo": r["tipo"]
         }
 

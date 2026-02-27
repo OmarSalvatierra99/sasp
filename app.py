@@ -52,9 +52,10 @@ log = logging.getLogger("SCIL")
 # Configuración
 # -----------------------------------------------------------
 app = Flask(__name__)
-app.secret_key = "ofs_sasp_2025"
+app.secret_key = os.environ.get("SECRET_KEY", "ofs_sasp_2025")
 
-DB_PATH = os.environ.get("SCIL_DB", "scil.db")
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = os.environ.get("SCIL_DB", str(BASE_DIR / "scil.db"))
 db_manager = DatabaseManager(DB_PATH)
 set_db_manager(db_manager)
 data_processor = DataProcessor()  # usa el mismo db_path por defecto
@@ -122,7 +123,7 @@ def logout():
     usuario = session.get("usuario")
     session.clear()
     log.info("Logout usuario=%s", usuario)
-    return redirect(url_for("login"))
+    return redirect("http://192.168.1.248/SIFEET-2025/")
 
 # -----------------------------------------------------------
 # DASHBOARD
@@ -173,160 +174,413 @@ def upload_laboral():
 # -----------------------------------------------------------
 # RESULTADOS AGRUPADOS
 # -----------------------------------------------------------
-@app.route("/resultados")
-def reporte_por_ente():
-    # Obtener cruces reales y filtrar solo los que tienen duplicidad real (intersección de QNAs)
-    resultados = db_manager.obtener_cruces_reales()
-    resultados_filtrados = _filtrar_duplicados_reales(resultados)
+def _es_usuario_luis():
+    return session.get("usuario", "").strip().lower() in {"luis", "odilia", "felipe"}
 
-    entes_usuario = session.get("entes", [])
-    agrupado = {}
 
-    modo_permiso = _allowed_all(entes_usuario)
+def _es_usuario_validador():
+    return session.get("usuario", "").strip().lower() == "luis"
 
-    for r in resultados_filtrados:
-        # Los entes con cruce real ya fueron calculados en _filtrar_duplicados_reales
-        entes_cruce_real = set(r.get("entes_cruce_real", []))
 
-        for e in entes_cruce_real:
-            # Determinar tipo de ente (ENTE / MUNICIPIO)
-            info_ente = _entes_cache().get(_sanitize_text(e), {})
-            tipo_ente = info_ente.get("tipo", "")
+def _tipo_ente(ente_clave):
+    ref = _sanitize_text(ente_clave)
+    cache = _entes_cache()
+    info = cache.get(ref)
+    if info:
+        return (info.get("tipo") or "ENTE").upper()
+    for k, d in cache.items():
+        if ref in {_sanitize_text(k), _sanitize_text(d.get("siglas")), _sanitize_text(d.get("nombre"))}:
+            return (d.get("tipo") or "ENTE").upper()
+    return "ENTE"
 
-            # Evaluar permisos
-            if modo_permiso == "ALL":
-                permitido = True
-            elif modo_permiso == "ENTES":
-                permitido = (tipo_ente == "ENTE")
-            elif modo_permiso == "MUNICIPIO":
-                permitido = (tipo_ente == "MUNICIPIO")
-            else:
-                permitido = any(_ente_match(eu, [e]) for eu in entes_usuario)
 
-            if not permitido:
+def _coincide_ambito(ambito_sel, tipo_ente):
+    tipo = (tipo_ente or "ENTE").upper()
+    if ambito_sel == "municipios":
+        return "MUNIC" in tipo
+    return "MUNIC" not in tipo
+
+
+def _puede_ver_ente(ente_clave, entes_usuario, modo_permiso=None):
+    if _es_usuario_luis():
+        return True
+    modo = modo_permiso if modo_permiso is not None else _allowed_all(entes_usuario)
+    tipo_ente = _tipo_ente(ente_clave)
+
+    if modo == "ALL":
+        return True
+    if modo == "ENTES":
+        return tipo_ente == "ENTE"
+    if modo == "MUNICIPIOS":
+        return tipo_ente == "MUNICIPIO"
+    return any(_ente_match(eu, [ente_clave]) for eu in entes_usuario)
+
+
+def _es_prevalidado_oculto(mapa_pre, ente_clave):
+    clave = db_manager.normalizar_ente_clave(ente_clave) or ente_clave
+    estado = str((mapa_pre.get(clave) or {}).get("estado", "Sin valoración")).strip().upper()
+    return estado in {"SOLVENTADO", "NO SOLVENTADO"}
+
+
+def _filtrar_duplicados_con_visibilidad(resultados):
+    filtrados = _filtrar_duplicados_reales(resultados)
+    out = []
+    for r in filtrados:
+        mapa_pre = db_manager.get_prevalidaciones_por_rfc(str(r.get("rfc", "")))
+        entes_visibles = [e for e in (r.get("entes") or []) if not _es_prevalidado_oculto(mapa_pre, e)]
+        entes_visibles = sorted(set(entes_visibles))
+        if len(entes_visibles) < 2:
+            continue
+        r2 = dict(r)
+        r2["entes"] = entes_visibles
+        out.append(r2)
+    return out
+
+
+def _resolver_texto_solventacion(pre, solv, fallback=""):
+    catalogo = str((pre or {}).get("catalogo", "")).strip()
+    otro = str((pre or {}).get("otro_texto", "")).strip()
+    comentario = str((pre or {}).get("comentario", "")).strip()
+
+    motivo = ""
+    if catalogo:
+        motivo = otro if catalogo == "Otro" and otro else catalogo
+
+    if motivo and comentario:
+        return f"{motivo} - {comentario}"
+    if motivo:
+        return motivo
+    if comentario:
+        return comentario
+
+    comentario_solv = str((solv or {}).get("comentario", "")).strip()
+    if comentario_solv:
+        return comentario_solv
+    return str(fallback or "").strip()
+
+
+def _construir_detalle_solventados(resultados, filtro_ente, ambito_sel, entes_usuario, modo_permiso):
+    rfc_solventados = set()
+    registros_solventados = set()
+    detalle_agrupado = {}
+
+    rfcs = sorted({str(r.get("rfc", "")).strip().upper() for r in resultados if str(r.get("rfc", "")).strip()})
+    prevalidaciones_por_rfc = db_manager.get_prevalidaciones_por_rfcs(rfcs)
+
+    for r in resultados:
+        rfc_actual = str(r.get("rfc", "")).strip().upper()
+        mapa_pre = prevalidaciones_por_rfc.get(rfc_actual, {})
+        for ente_clave in (r.get("entes") or []):
+            if not _puede_ver_ente(ente_clave, entes_usuario, modo_permiso):
+                continue
+            if not _coincide_ambito(ambito_sel, _tipo_ente(ente_clave)):
                 continue
 
-            ente_nombre = _ente_display(e)
-            agrupado.setdefault(ente_nombre, {})
+            display = _ente_display(ente_clave)
+            if filtro_ente and display != filtro_ente:
+                continue
 
-            rfc = r.get("rfc")
-            puesto = (
-                r.get("puesto")
-                or ", ".join({reg.get("puesto", "").strip()
-                              for reg in (r.get("registros") or [])
-                              if reg.get("puesto")})
-                or "Sin puesto"
-            )
+            clave_norm = db_manager.normalizar_ente_clave(ente_clave) or ente_clave
+            pre = mapa_pre.get(clave_norm, {})
+            pre_estado = str(pre.get("estado", "Sin valoración")).strip().upper()
+            if pre_estado != "SOLVENTADO":
+                continue
 
-            if rfc not in agrupado[ente_nombre]:
-                agrupado[ente_nombre][rfc] = {
-                    "rfc": r["rfc"],
-                    "nombre": r["nombre"],
-                    "puesto": puesto,
+            rfc = str(r.get("rfc", "")).strip()
+            rfc_solventados.add(rfc)
+            registros_solventados.add(f"{rfc}|{clave_norm}")
+
+            catalogo = str(pre.get("catalogo", "")).strip()
+            otro = str(pre.get("otro_texto", "")).strip()
+            comentario = str(pre.get("comentario", "")).strip()
+            motivo = "Sin motivo"
+            if catalogo:
+                motivo = otro if catalogo == "Otro" and otro else catalogo
+
+            key = f"{rfc}|{motivo}"
+            if key not in detalle_agrupado:
+                detalle_agrupado[key] = {
+                    "rfc": rfc,
+                    "nombre": str(r.get("nombre", "")),
+                    "motivo": motivo,
+                    "observacion": comentario,
                     "entes": set(),
-                    "estado": r.get("estado", "Sin valoración"),
-                    "estado_entes": {}
                 }
+            if not detalle_agrupado[key]["observacion"] and comentario:
+                detalle_agrupado[key]["observacion"] = comentario
+            detalle_agrupado[key]["entes"].add(display)
 
-            # Agregar todos los entes EXCEPTO el ente actual
-            for en in r.get("entes", []):
-                if _sanitize_text(en) != _sanitize_text(e):
-                    agrupado[ente_nombre][rfc]["entes"].add(_ente_sigla(en))
+    detalle = []
+    for item in detalle_agrupado.values():
+        entes = sorted(item["entes"])
+        detalle.append({
+            "rfc": item["rfc"],
+            "nombre": item["nombre"],
+            "ente": ", ".join(entes),
+            "motivo": item["motivo"],
+            "observacion": item["observacion"],
+        })
+    detalle.sort(key=lambda x: (x["rfc"], x["motivo"]))
 
-            mapa_solvs = db_manager.get_solventaciones_por_rfc(r["rfc"])
-            estado_default = r.get("estado", "Sin valoración")
-            for en in r.get("entes", []):
-                if _sanitize_text(en) != _sanitize_text(e):
-                    clave = db_manager.normalizar_ente_clave(en)
-                    est = mapa_solvs.get(clave, {}).get("estado") if mapa_solvs else None
-                    agrupado[ente_nombre][rfc]["estado_entes"][_ente_sigla(en)] = est or estado_default
+    return {
+        "resumen": {
+            "rfc_solventados": len(rfc_solventados),
+            "registros_solventados": len(registros_solventados),
+        },
+        "detalle": detalle,
+    }
 
-    # Agregar TODOS los entes del catálogo (incluso con 0 trabajadores)
-    todos_entes = db_manager.listar_entes()
-    todos_municipios = db_manager.listar_municipios()
-    todos_entidades = todos_entes + todos_municipios
-    entes_info = {}       # {nombre_ente: {siglas, total_trabajadores}}
-    entes_con_datos = {}  # Entes con trabajadores cargados (incluso sin duplicidades)
 
-    # Contar trabajadores por ente desde la tabla de registros
-    trabajadores_por_ente_clave = db_manager.contar_trabajadores_por_ente()
+def _build_validacion_error_message(exc, accion):
+    base = "No fue posible cancelar la validación." if accion == "cancelar" else "No fue posible validar los datos."
+    msg = str(exc).lower()
+    db_path = DB_PATH
+    if "readonly" in msg or "attempt to write a readonly database" in msg:
+        db_writable = os.access(db_path, os.W_OK)
+        dir_writable = os.access(os.path.dirname(db_path), os.W_OK)
+        return (
+            f"{base} SQLite está en solo lectura. DB: {db_path}. "
+            f"¿DB escribible?: {'sí' if db_writable else 'no'}. "
+            f"¿Carpeta escribible?: {'sí' if dir_writable else 'no'}."
+        )
+    return f"{base} Error técnico: {exc}"
 
-    # Convertir claves a nombres display
-    trabajadores_por_ente = {}
-    for clave, total in trabajadores_por_ente_clave.items():
-        ente_display = _ente_display(clave)
-        trabajadores_por_ente[ente_display] = total
 
-    for ente in todos_entidades:
-        ente_nombre = ente['siglas'] or ente['nombre']
+@app.route("/resultados")
+def reporte_por_ente():
+    filtro_ente = request.args.get("ente", "").strip()
+    ambito_sel = request.args.get("ambito", "estatales").strip().lower()
+    if ambito_sel not in {"estatales", "municipios"}:
+        ambito_sel = "estatales"
 
-        # Determinar tipo de ente desde el catálogo unificado
-        info_ente = _entes_cache().get(_sanitize_text(ente['clave']), {})
-        tipo_ente = info_ente.get("tipo", "ENTE")  # por defecto ENTES
+    validacion_error = request.args.get("validacion_error", "") == "1"
+    validacion_error_msg = ""
+    if validacion_error:
+        validacion_error_msg = session.pop("validacion_error_msg", "No fue posible validar los datos.")
 
-        # Verificar permisos según modo
-        if modo_permiso == "ALL":
-            permitido = True
-        elif modo_permiso == "ENTES":
-            permitido = (tipo_ente == "ENTE")
-        elif modo_permiso == "MUNICIPIOS":
-            permitido = (tipo_ente == "MUNICIPIO")
-        else:
-            permitido = any(_ente_match(eu, [ente['clave']]) for eu in entes_usuario)
+    entes_usuario = session.get("entes", [])
+    es_luis = _es_usuario_luis()
+    es_validador = _es_usuario_validador()
+    resultados_validados = db_manager.resultados_validados()
+    mostrar_duplicados = es_luis or resultados_validados
+    mostrar_metricas = es_validador or resultados_validados
+    modo_permiso = "ALL" if es_luis else _allowed_all(entes_usuario)
 
-        if not permitido:
+    resultados_base = db_manager.obtener_cruces_reales()
+    resultados = (
+        _filtrar_duplicados_reales(resultados_base)
+        if es_luis else _filtrar_duplicados_con_visibilidad(resultados_base)
+    )
+    trabajadores_por_ente_map = db_manager.contar_trabajadores_por_ente()
+    trabajadores_detallados = db_manager.obtener_trabajadores_por_ente()
+    catalogo = db_manager.listar_entes() + db_manager.listar_municipios()
+
+    agrupado = {}
+    entes_info = {}
+
+    for ente in catalogo:
+        display = ente.get("siglas") or ente.get("nombre")
+        clave = ente.get("clave")
+        tipo = str(ente.get("ambito") or "ENTE").upper()
+
+        if not _puede_ver_ente(clave, entes_usuario, modo_permiso):
+            continue
+        if not _coincide_ambito(ambito_sel, tipo):
             continue
 
-        # Si el ente no tiene trabajadores en agrupado, agregarlo con lista vacía
-        if ente_nombre not in agrupado:
-            agrupado[ente_nombre] = {}
-
-        total_trabajadores = trabajadores_por_ente.get(ente_nombre, 0)
-        total_duplicados = len(agrupado.get(ente_nombre, {}))
-
-        entes_info[ente_nombre] = {
-            'num': ente['num'],
-            'siglas': ente['siglas'],
-            'nombre_completo': ente['nombre'],
-            'total': total_trabajadores,
-            'duplicados': total_duplicados,
-            'tipo': tipo_ente  # ENTE o MUNICIPIO
+        agrupado.setdefault(display, [])
+        entes_info[display] = {
+            "num": ente.get("num"),
+            "siglas": ente.get("siglas"),
+            "nombre_completo": ente.get("nombre"),
+            "total": trabajadores_por_ente_map.get(clave, 0),
+            "duplicados": 0,
+            "tipo": tipo,
         }
 
-        # Si tiene trabajadores pero no duplicidades, agregarlo a entes_con_datos
-        if total_trabajadores > 0 and total_duplicados == 0:
-            entes_con_datos[ente_nombre] = {
-                'siglas': ente['siglas'],
-                'nombre_completo': ente['nombre'],
-                'total': total_trabajadores
-            }
+    resumen_prevalidacion = {"rfc_solventados": 0, "registros_solventados": 0}
+    detalle_solventados = []
 
-    # Función de ordenamiento por NUM jerárquico
-    def orden_por_num(item):
-        """Ordena por NUM respetando jerarquía (1.2.3 antes de 1.10)"""
-        ente_nombre, info = item
-        num_str = str(info.get('num', '999')).strip().rstrip('.')
+    if mostrar_duplicados:
+        solventados = _construir_detalle_solventados(resultados, filtro_ente, ambito_sel, entes_usuario, modo_permiso)
+        resumen_prevalidacion = solventados["resumen"]
+        detalle_solventados = solventados["detalle"]
+
+        rfcs_resultados = sorted({
+            str(r.get("rfc", "")).strip().upper()
+            for r in resultados
+            if str(r.get("rfc", "")).strip()
+        })
+        solventaciones_por_rfc = db_manager.get_solventaciones_por_rfcs(rfcs_resultados)
+        prevalidaciones_por_rfc = db_manager.get_prevalidaciones_por_rfcs(rfcs_resultados)
+
+        for r in resultados:
+            rfc_actual = str(r.get("rfc", "")).strip().upper()
+            mapa_solvs = solventaciones_por_rfc.get(rfc_actual, {})
+            mapa_pre = prevalidaciones_por_rfc.get(rfc_actual, {})
+
+            for ente_clave in (r.get("entes") or []):
+                if not es_luis and _es_prevalidado_oculto(mapa_pre, ente_clave):
+                    continue
+                if not _puede_ver_ente(ente_clave, entes_usuario, modo_permiso):
+                    continue
+                if not _coincide_ambito(ambito_sel, _tipo_ente(ente_clave)):
+                    continue
+
+                display = _ente_display(ente_clave)
+                if filtro_ente and display != filtro_ente:
+                    continue
+                if display not in entes_info:
+                    continue
+
+                otros_entes = []
+                for e in (r.get("entes") or []):
+                    if _sanitize_text(e) != _sanitize_text(ente_clave):
+                        s = _ente_sigla(e)
+                        if s not in otros_entes:
+                            otros_entes.append(s)
+
+                estado_default = r.get("estado", "Sin valoración")
+                estado_entes = {}
+                for en in (r.get("entes") or []):
+                    clave_norm = db_manager.normalizar_ente_clave(en) or en
+                    estado_entes[_ente_sigla(en)] = (mapa_solvs.get(clave_norm) or {}).get("estado", estado_default)
+
+                clave_actual = db_manager.normalizar_ente_clave(ente_clave) or ente_clave
+                pre = mapa_pre.get(clave_actual, {})
+                pre_estado = str(pre.get("estado", "Sin valoración"))
+
+                puesto = (
+                    r.get("puesto")
+                    or ", ".join(sorted({
+                        (reg.get("puesto") or "").strip()
+                        for reg in (r.get("registros") or [])
+                        if (reg.get("puesto") or "").strip()
+                    }))
+                    or "Sin puesto"
+                )
+
+                agrupado[display].append({
+                    "rfc": r.get("rfc"),
+                    "nombre": r.get("nombre"),
+                    "puesto": puesto,
+                    "entes": otros_entes,
+                    "estado": estado_default,
+                    "estado_entes": estado_entes,
+                    "ente_origen": ente_clave,
+                    "pre_estado": pre_estado,
+                    "pre_valoracion": pre.get("comentario", ""),
+                    "pre_catalogo": pre.get("catalogo", ""),
+                    "pre_otro_texto": pre.get("otro_texto", ""),
+                })
+
+    for display, info in entes_info.items():
+        info["duplicados"] = len(agrupado.get(display, []))
+
+    def _orden_por_num(item):
+        info = item[1]
+        num_str = str(info.get("num", "999")).strip().rstrip(".")
         partes = []
-        for parte in num_str.split('.'):
+        for parte in num_str.split("."):
             try:
                 partes.append(int(parte))
             except ValueError:
                 partes.append(999)
-        # Rellenar con ceros para comparación consistente
         while len(partes) < 5:
             partes.append(0)
         return tuple(partes)
 
-    agrupado_final = {k: list(v.values()) for k, v in agrupado.items()}
+    entes_info_ordenado = {}
+    for k, v in sorted(entes_info.items(), key=_orden_por_num):
+        entes_info_ordenado[k] = v
 
-    # Ordenar entes_info por NUM
-    entes_info_ordenados = sorted(entes_info.items(), key=orden_por_num)
+    agrupado_final = {}
+    for k, v in agrupado.items():
+        if filtro_ente and k != filtro_ente:
+            continue
+        agrupado_final[k] = v
+
+    trabajadores_por_ente_final = {}
+    rfc_procesados = set()
+    registros_cargados = 0
+    for ente_clave, trabajadores in trabajadores_detallados.items():
+        if not _puede_ver_ente(str(ente_clave), entes_usuario, modo_permiso):
+            continue
+        if not _coincide_ambito(ambito_sel, _tipo_ente(str(ente_clave))):
+            continue
+
+        display = _ente_display(str(ente_clave))
+        if filtro_ente and display != filtro_ente:
+            continue
+
+        for trab in trabajadores:
+            trabajadores_por_ente_final.setdefault(display, []).append(trab)
+            rfc = str(trab.get("rfc", "")).strip().upper()
+            if rfc:
+                rfc_procesados.add(rfc)
+            registros_cargados += 1
+
+    rfc_duplicados = set()
+    for r in resultados:
+        entes_visibles = []
+        for ente_cruce in (r.get("entes") or []):
+            if _puede_ver_ente(str(ente_cruce), entes_usuario, modo_permiso):
+                if not _coincide_ambito(ambito_sel, _tipo_ente(str(ente_cruce))):
+                    continue
+                entes_visibles.append(str(ente_cruce))
+        entes_visibles = sorted(set(entes_visibles))
+        if len(entes_visibles) < 2:
+            continue
+
+        if filtro_ente:
+            if not any(_ente_display(e) == filtro_ente for e in entes_visibles):
+                continue
+
+        rfc = str(r.get("rfc", "")).strip().upper()
+        if rfc:
+            rfc_duplicados.add(rfc)
+
+    entes_visibles = sum(1 for nombre in entes_info_ordenado if (not filtro_ente or nombre == filtro_ente))
+    trabajadores_procesados = len(rfc_procesados)
+    duplicados_detectados = len(rfc_duplicados)
+    indice_duplicidad = round((duplicados_detectados / trabajadores_procesados) * 100, 2) if trabajadores_procesados else 0.0
+    entes_con_duplicidad = sum(
+        1
+        for nombre, info in entes_info_ordenado.items()
+        if (not filtro_ente or nombre == filtro_ente) and int(info.get("duplicados", 0)) > 0
+    )
+
+    resumen_auditoria = [
+        {"m": "Entes analizados", "v": str(entes_visibles)},
+        {"m": "Trabajadores analizados (RFC únicos)", "v": f"{trabajadores_procesados:,}"},
+        {"m": "Casos de duplicidad (RFC únicos)", "v": str(duplicados_detectados)},
+        {"m": "Entes con duplicidad", "v": str(entes_con_duplicidad)},
+        {"m": "Índice de trabajadores duplicados", "v": f"{indice_duplicidad:.2f}%"},
+    ]
 
     return render_template(
         "resultados.html",
         resultados=agrupado_final,
-        entes_info=entes_info_ordenados,
-        entes_con_datos=dict(sorted(entes_con_datos.items()))
+        trabajadores_por_ente=trabajadores_por_ente_final,
+        entes_info=entes_info_ordenado,
+        filtro_ente=filtro_ente,
+        ambito_sel=ambito_sel,
+        es_luis=es_luis,
+        es_validador=es_validador,
+        resultados_validados=resultados_validados,
+        mostrar_duplicados=mostrar_duplicados,
+        mostrar_metricas=mostrar_metricas,
+        validacion_error=validacion_error,
+        validacion_error_msg=validacion_error_msg,
+        resumen_auditoria=resumen_auditoria,
+        resumen_prevalidacion=resumen_prevalidacion,
+        detalle_solventados=detalle_solventados,
+        resumen={
+            "entes_visibles": entes_visibles,
+            "registros_cargados": registros_cargados,
+            "trabajadores_procesados": trabajadores_procesados,
+            "duplicados_detectados": duplicados_detectados,
+        },
     )
 
 # -----------------------------------------------------------
@@ -334,9 +588,32 @@ def reporte_por_ente():
 # -----------------------------------------------------------
 @app.route("/resultados/<rfc>")
 def resultados_por_rfc(rfc):
+    es_luis = _es_usuario_luis()
+
+    if not es_luis and not db_manager.resultados_validados():
+        return redirect(url_for("reporte_por_ente"))
+
     info = db_manager.obtener_resultados_por_rfc(rfc)
     if not info:
         return render_template("empty.html", mensaje="No hay registros del trabajador.")
+
+    if not es_luis:
+        mapa_pre = db_manager.get_prevalidaciones_por_rfc(rfc)
+        if mapa_pre:
+            registros_visibles = []
+            entes_visibles = set()
+            for reg in info.get("registros", []):
+                ente_reg = reg.get("ente", "")
+                if ente_reg and _es_prevalidado_oculto(mapa_pre, ente_reg):
+                    continue
+                registros_visibles.append(reg)
+                if ente_reg:
+                    entes_visibles.add(ente_reg)
+            info["registros"] = registros_visibles
+            info["entes"] = sorted(entes_visibles)
+
+        if len(info.get("entes", [])) < 2:
+            return render_template("empty.html", mensaje="Este RFC no presenta ninguna incompatibilidad")
 
     mapa_solvs = db_manager.get_solventaciones_por_rfc(rfc)
     if mapa_solvs and info.get("registros"):
@@ -346,20 +623,13 @@ def resultados_por_rfc(rfc):
                 reg["estado_ente"] = mapa_solvs[ente_clave]["estado"]
                 reg["comentario_ente"] = mapa_solvs[ente_clave]["comentario"]
 
-        estados_regs = {reg.get("estado_ente") or info.get("estado") for reg in info["registros"]}
-        estados_regs = {e for e in estados_regs if e}
-        if len(estados_regs) == 1:
-            info["estado"] = estados_regs.pop()
-        elif len(estados_regs) > 1:
-            info["estado"] = "Mixto"
-
-    return render_template("detalle_rfc.html", rfc=rfc, info=info)
+    return render_template("detalle_rfc.html", rfc=rfc, info=info, es_luis=es_luis)
 
 
 @app.route("/solventacion/<rfc>", methods=["GET", "POST"])
 def solventacion_detalle(rfc):
-    if not session.get("autenticado"):
-        return redirect(url_for("login"))
+    if not _es_usuario_luis():
+        return redirect(url_for("reporte_por_ente"))
 
     ente_sel = request.args.get("ente")
 
@@ -407,6 +677,9 @@ def solventacion_detalle(rfc):
 # -----------------------------------------------------------
 @app.route("/actualizar_estado", methods=["POST"])
 def actualizar_estado():
+    if not _es_usuario_luis():
+        return jsonify({"error": "No autorizado"}), 403
+
     data = request.get_json(silent=True) or {}
     rfc = data.get("rfc")
     estado = data.get("estado")
@@ -426,6 +699,85 @@ def actualizar_estado():
         log.exception("Error en actualizar_estado")
         return jsonify({"error": str(e)}), 500
 
+
+@app.route("/prevalidar_duplicado", methods=["POST"])
+def prevalidar_duplicado():
+    if not _es_usuario_luis():
+        return jsonify({"error": "No autorizado"}), 403
+
+    data = request.get_json(silent=True) or {}
+    rfc = str(data.get("rfc", "")).strip()
+    ente = str(data.get("ente", "")).strip()
+    estado = str(data.get("estado", "Sin valoración")).strip() or "Sin valoración"
+    comentario = str(data.get("valoracion", "")).strip()
+    catalogo = str(data.get("catalogo", "")).strip()
+    otro_texto = str(data.get("otro_texto", "")).strip()
+
+    if not rfc or not ente:
+        return jsonify({"error": "Faltan RFC o ente"}), 400
+    if estado not in {"Sin valoración", "Solventado"}:
+        return jsonify({"error": "Estado de pre-validación no permitido"}), 400
+    if estado == "Solventado" and not catalogo:
+        return jsonify({"error": "Selecciona una opción de catálogo"}), 400
+    if catalogo == "Otro" and not otro_texto:
+        return jsonify({"error": "Debes especificar texto para opción Otro"}), 400
+
+    if estado == "Sin valoración":
+        comentario, catalogo, otro_texto = "", "", ""
+
+    try:
+        usuario = session.get("usuario", "luis")
+        entes_cruce = db_manager.obtener_entes_con_cruce_por_rfc(rfc)
+        if not entes_cruce:
+            entes_cruce = [ente]
+
+        entes_afectados = []
+        filas = 0
+        for ente_obj in sorted(set(entes_cruce)):
+            ente_norm = db_manager.normalizar_ente_clave(ente_obj) or ente_obj
+            entes_afectados.append(ente_norm)
+            filas += db_manager.guardar_prevalidacion_duplicado(
+                rfc, ente_norm, estado, comentario, catalogo, otro_texto, usuario
+            )
+
+        return jsonify({
+            "mensaje": f"Pre-validación aplicada en {len(entes_afectados)} ente(s)",
+            "filas": filas,
+            "entes_afectados": entes_afectados,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/validar_datos", methods=["POST"])
+def validar_datos():
+    if not _es_usuario_validador():
+        return jsonify({"error": "No autorizado"}), 403
+    try:
+        db_manager.marcar_resultados_validados(session.get("usuario", "luis"))
+        return redirect(url_for("reporte_por_ente"))
+    except Exception as e:
+        log.exception("Error al validar datos")
+        if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
+            return jsonify({"error": "No fue posible validar los datos."}), 500
+        session["validacion_error_msg"] = _build_validacion_error_message(e, "validar")
+        return redirect(url_for("reporte_por_ente", validacion_error=1))
+
+
+@app.route("/cancelar_validacion", methods=["POST"])
+def cancelar_validacion():
+    if not _es_usuario_validador():
+        return jsonify({"error": "No autorizado"}), 403
+    try:
+        db_manager.desmarcar_resultados_validados(session.get("usuario", "luis"))
+        return redirect(url_for("reporte_por_ente"))
+    except Exception as e:
+        log.exception("Error al cancelar validación")
+        if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
+            return jsonify({"error": "No fue posible cancelar la validación."}), 500
+        session["validacion_error_msg"] = _build_validacion_error_message(e, "cancelar")
+        return redirect(url_for("reporte_por_ente", validacion_error=1))
+
 # -----------------------------------------------------------
 # EXPORTAR POR ENTE (JSON + Excel)
 # -----------------------------------------------------------
@@ -433,13 +785,27 @@ def actualizar_estado():
 def exportar_por_ente():
     ente_sel = request.args.get("ente", "").strip()
     formato = request.args.get("formato", "").lower()
-    if not ente_sel:
-        return jsonify({"error": "No se seleccionó un ente"}), 400
+    entes_usuario = session.get("entes", [])
+    es_luis = _es_usuario_luis()
+    modo_permiso = "ALL" if es_luis else _allowed_all(entes_usuario)
 
-    # Obtener cruces y filtrar solo los que tienen duplicidad real (intersección de QNAs)
-    resultados = db_manager.obtener_cruces_reales()
-    resultados_filtrados = _filtrar_duplicados_reales(resultados)
-    filas = _construir_filas_export(resultados_filtrados)
+    if not es_luis and not db_manager.resultados_validados():
+        return redirect(url_for("reporte_por_ente"))
+    if not ente_sel:
+        return redirect(url_for("reporte_por_ente"))
+
+    resultados_base = db_manager.obtener_cruces_reales()
+    resultados = (
+        _filtrar_duplicados_reales(resultados_base)
+        if es_luis else _filtrar_duplicados_con_visibilidad(resultados_base)
+    )
+    permitidos = []
+    for r in resultados:
+        for ente in (r.get("entes") or []):
+            if _ente_display(ente) == ente_sel and _puede_ver_ente(ente, entes_usuario, modo_permiso):
+                permitidos.append(r)
+                break
+    filas = _construir_filas_export(permitidos)
 
     # Filtrar registros con N/A en Quincenas (sin intersección temporal)
     filas = [f for f in filas if f.get("Quincenas") != "N/A"]
@@ -473,13 +839,48 @@ def exportar_por_ente():
 @app.route("/exportar_general")
 def exportar_excel_general():
     formato = request.args.get("formato", "").lower()
-    # Obtener cruces y filtrar solo los que tienen duplicidad real (intersección de QNAs)
-    resultados = db_manager.obtener_cruces_reales()
-    resultados_filtrados = _filtrar_duplicados_reales(resultados)
-    filas = _construir_filas_export(resultados_filtrados)
+    es_luis = _es_usuario_luis()
+    entes_usuario = session.get("entes", [])
+    modo_permiso = "ALL" if es_luis else _allowed_all(entes_usuario)
+
+    if not es_luis and not db_manager.resultados_validados():
+        return redirect(url_for("reporte_por_ente"))
+
+    resultados_base = db_manager.obtener_cruces_reales()
+    resultados = (
+        _filtrar_duplicados_reales(resultados_base)
+        if es_luis else _filtrar_duplicados_con_visibilidad(resultados_base)
+    )
+    filas = _construir_filas_export(resultados)
 
     # Filtrar registros con N/A en Quincenas (sin intersección temporal)
     filas = [f for f in filas if f.get("Quincenas") != "N/A"]
+
+    # Respetar visibilidad por usuario: no exportar entes/municipios fuera de su cargo.
+    if not es_luis:
+        filas_visibles = []
+        for fila in filas:
+            ente_origen = str(fila.get("Ente Origen", "")).strip()
+            if not _puede_ver_ente(ente_origen, entes_usuario, modo_permiso):
+                continue
+
+            entes_incompat = [
+                e.strip()
+                for e in str(fila.get("Entes Incompatibilidad", "")).split(",")
+                if e.strip()
+            ]
+            entes_incompat_visibles = [
+                e for e in entes_incompat
+                if _puede_ver_ente(e, entes_usuario, modo_permiso)
+            ]
+
+            fila_segura = dict(fila)
+            fila_segura["Entes Incompatibilidad"] = (
+                ", ".join(entes_incompat_visibles) if entes_incompat_visibles else "Sin otros entes"
+            )
+            filas_visibles.append(fila_segura)
+
+        filas = filas_visibles
 
     if not filas:
         return jsonify({"error": "Sin datos para exportar."}), 404
@@ -491,6 +892,7 @@ def exportar_excel_general():
         "RFC", "Nombre", "Puesto", "Fecha Alta", "Fecha Baja", "Total Percepciones",
         "Ente Origen", "Entes Incompatibilidad", "Quincenas", "Estatus", "Solventación"
     ]]
+    df.rename(columns={"Total Percepciones": "Total de Percepciones Anual"}, inplace=True)
     df.sort_values(by=["RFC", "Ente Origen"], inplace=True)
 
     output = BytesIO()
@@ -504,6 +906,74 @@ def exportar_excel_general():
 
     output.seek(0)
     return send_file(output, download_name="SASP_Duplicidades_Generales.xlsx", as_attachment=True)
+
+
+@app.route("/exportar_solventados")
+def exportar_solventados():
+    if not _es_usuario_luis():
+        return "No autorizado", 403
+
+    filtro_ente = request.args.get("ente", "").strip()
+    ambito_sel = request.args.get("ambito", "estatales").strip().lower()
+    if ambito_sel not in {"estatales", "municipios"}:
+        ambito_sel = "estatales"
+
+    resultados = _filtrar_duplicados_reales(db_manager.obtener_cruces_reales())
+    detalle = _construir_detalle_solventados(
+        resultados,
+        filtro_ente,
+        ambito_sel,
+        session.get("entes", []),
+        "ALL",
+    )["detalle"]
+
+    filas_general = _construir_filas_export(resultados)
+    qnas_por_rfc_ente = {}
+    for fila in filas_general:
+        qnas_txt = str(fila.get("Quincenas", "")).strip()
+        if not qnas_txt or qnas_txt == "N/A":
+            continue
+        rfc_key = str(fila.get("RFC", "")).strip().upper()
+        ente_key = str(fila.get("Ente Origen", "")).strip()
+        if not rfc_key or not ente_key:
+            continue
+        qnas_por_rfc_ente.setdefault((rfc_key, ente_key), set()).add(qnas_txt)
+
+    filas = []
+    for item in detalle:
+        rfc_item = str(item.get("rfc", "")).strip().upper()
+        entes_item = [e.strip() for e in str(item.get("ente", "")).split(",") if e.strip()]
+        qnas_item = set()
+        for ente in entes_item:
+            qnas_item.update(qnas_por_rfc_ente.get((rfc_item, ente), set()))
+        quincenas_incompat = ", ".join(sorted(qnas_item)) if qnas_item else "N/A"
+
+        filas.append({
+            "RFC": item["rfc"],
+            "Nombre": item["nombre"],
+            "Ente Origen": item["ente"],
+            "Estatus": "Solventado",
+            "Motivo de Solventación": item["motivo"],
+            "Observación": item["observacion"],
+            "Quincenas de incompatibilidad": quincenas_incompat,
+        })
+
+    df = pd.DataFrame(filas, columns=[
+        "RFC",
+        "Nombre",
+        "Ente Origen",
+        "Estatus",
+        "Motivo de Solventación",
+        "Observación",
+        "Quincenas de incompatibilidad",
+    ])
+    df.sort_values(by=["RFC", "Ente Origen"], inplace=True)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Solventados")
+    output.seek(0)
+    return send_file(output, download_name="SASP_Solventados.xlsx", as_attachment=True)
 
 # -----------------------------------------------------------
 # CATÁLOGOS

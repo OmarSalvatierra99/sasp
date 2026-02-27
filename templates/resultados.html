@@ -2,85 +2,197 @@
 {% block title %}Resultados por Ente - SASP{% endblock %}
 
 {% block content %}
-<style>
-.acordeon-icono {
-  display: inline-block;
-  transition: transform 0.2s ease;
-  font-size: 0.8rem;
-  color: var(--color-accent);
-}
-.acordeon-header:hover {
-  background: linear-gradient(90deg, #003366, var(--color-accent));
-}
-</style>
+{% set pre_catalogo_opciones = [
+  '',
+  'Presentan horarios laborales autorizados y actualizados que acreditan la compatibilidad.',
+  'Remiten documentación que acredita el reintegro de los recursos observados.',
+  'Presentan la cancelación de cheques que no fueron cobrados por el servidor público observado.',
+  'Documentan que el servidor público no laboró en el periodo observado, solo tuvo pagos por liquidación o indemnización.',
+  'Presentan permiso de horario convenido, estableciendo el horario en que se reponen las horas.',
+  'Remiten oficios de licencia con goce de sueldo.',
+  'Otro'
+] %}
 
 <div class="report-container">
   <header class="header-flex">
-    <h2>Resultados Agrupados por Ente</h2>
-    <span class="subtitle">Consulta de posibles duplicidades detectadas</span>
+    <div>
+      <h2>Resultados Agrupados por Ente</h2>
+      <span class="subtitle">
+        {% if mostrar_duplicados %}
+          Cruces y duplicidades detectadas por ente
+        {% else %}
+          Vista previa: solo trabajadores procesados (duplicados ocultos hasta validación)
+        {% endif %}
+      </span>
+    </div>
+    {% if mostrar_duplicados %}
+      <div class="export-actions" style="display: flex; gap: 0.5rem; align-items: center;">
+        <a class="btn btn-primary" href="{{ url_for('exportar_excel_general') }}">Exportar General</a>
+        {% if filtro_ente %}
+          <a class="btn btn-secondary" href="{{ url_for('exportar_por_ente', ente=filtro_ente) }}">Exportar {{ filtro_ente }}</a>
+        {% endif %}
+      </div>
+    {% endif %}
   </header>
 
-  <!-- LEYENDA DE SEMÁFORO -->
-  <section class="semaforo-info">
-    <h3>Semáforo de Estado</h3>
-    <ul>
-      <li><span class="estado-text verde">Solventado</span> — Caso revisado y aclarado correctamente.</li>
-      <li><span class="estado-text rojo">No Solventado</span> — No acreditó y/o justifico la compatibilidad.</li>
-      <li><span class="estado-text gris">Sin valoración</span> — Pendiente de revisión por el auditor correspondiente.</li>
-    </ul>
-  </section>
+  {% if validacion_error %}
+    <div class="badge badge-danger" style="display: block; padding: var(--space-6); margin-bottom: var(--space-6);">
+      {{ validacion_error_msg or 'No fue posible validar los datos.' }}
+    </div>
+  {% endif %}
 
-  <!-- BARRA DE FILTRO Y EXPORTACIÓN -->
-  <div class="export-bar">
-    <div class="search-area">
-      <input type="text" id="searchInput" placeholder="🔍 Buscar por RFC o nombre..." />
+  {% if mostrar_metricas %}
+    <section style="margin-bottom:var(--space-6);">
+      <h3 style="margin:0 0 var(--space-4);">Resumen de Auditoría</h3>
+      <table class="tabla-resultados">
+        <thead>
+          <tr>
+            <th>Métrica</th>
+            <th>Valor</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for fila in (resumen_auditoria or []) %}
+            <tr>
+              <td><strong>{{ fila.m }}</strong></td>
+              <td>{{ fila.v }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  {% else %}
+    <div class="badge badge-neutral" style="display:block; padding:var(--space-6); margin-bottom:var(--space-6);">
+      Las métricas se habilitan cuando se validen los resultados.
+    </div>
+  {% endif %}
+
+  {% if es_luis %}
+    <div class="export-bar" style="margin-bottom: 1rem;">
+      {% if es_validador %}
+        {% if resultados_validados %}
+          <span class="badge badge-success">✓ Datos validados y visibles para todos</span>
+          <form method="post" action="{{ url_for('cancelar_validacion') }}" class="form-inline" onsubmit="return confirm('¿Volver resultados a borrador? Esto no borra solventaciones guardadas.');">
+            <button type="submit" class="btn btn-secondary">Volver resultados a borrador</button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ url_for('validar_datos') }}" class="form-inline">
+            <button type="submit" class="btn btn-primary">Validar datos</button>
+            <span class="subtitle">Al validar, los demás usuarios verán duplicados no solventados.</span>
+          </form>
+        {% endif %}
+      {% else %}
+        <span class="badge badge-neutral">Solo Luis puede validar o regresar a borrador.</span>
+      {% endif %}
+      <span class="badge badge-info">RFC solventados: {{ resumen_prevalidacion.rfc_solventados or 0 }}</span>
+      <span class="badge badge-info">Registros solventados: {{ resumen_prevalidacion.registros_solventados or 0 }}</span>
     </div>
 
-    <form id="filterForm" method="get" class="form-inline">
-      <select name="ente" id="selectEnte" onchange="document.getElementById('filterForm').submit()">
-        <option value="">Todos los Entes...</option>
-        {% for ente, data in resultados.items() %}
-          <option value="{{ ente }}" {% if request.args.get('ente') == ente %}selected{% endif %}>{{ ente }}</option>
-        {% endfor %}
-      </select>
-      <button formaction="{{ url_for('exportar_por_ente') }}" class="btn btn-secondary">🏛️ Exportar</button>
-      <a href="{{ url_for('exportar_excel_general') }}" class="btn btn-primary">📄 Exportar General</a>
-    </form>
+    <section style="margin-bottom:var(--space-6);">
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:var(--space-4); flex-wrap:wrap; margin-bottom:var(--space-3);">
+        <h3 style="margin:0;">Detalle de RFC solventados</h3>
+        <a class="btn btn-secondary" href="{{ url_for('exportar_solventados', ambito=ambito_sel, ente=filtro_ente) }}">
+          Exportar lista de solventados
+        </a>
+      </div>
+
+      {% if detalle_solventados %}
+        <table class="tabla-resultados">
+          <thead>
+            <tr>
+              <th>RFC</th>
+              <th>Nombre</th>
+              <th>Ente</th>
+              <th>Opción de solventación</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in detalle_solventados %}
+              <tr>
+                <td>{{ item.rfc }}</td>
+                <td>{{ item.nombre }}</td>
+                <td>{{ item.ente }}</td>
+                <td>{{ item.motivo }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <div class="badge badge-neutral" style="display:block; padding:var(--space-6);">
+          No hay RFC solventados para los filtros actuales.
+        </div>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  <div class="doble-tab-bar" style="margin-bottom: var(--space-6);">
+    <a class="tab-link {% if (ambito_sel or 'estatales') == 'estatales' %}active{% endif %}" href="{{ url_for('reporte_por_ente', ambito='estatales') }}">
+      Estatales
+    </a>
+    <a class="tab-link {% if (ambito_sel or 'estatales') == 'municipios' %}active{% endif %}" href="{{ url_for('reporte_por_ente', ambito='municipios') }}">
+      Municipios
+    </a>
   </div>
 
-  <!-- TABLAS DE RESULTADOS CON ACORDEONES -->
-  {% if entes_info %}
-    {# entes_info ya viene ordenado por NUM desde el backend #}
-    {% for ente_nombre, info in entes_info %}
-      {% if info.total > 0 and (not request.args.get('ente') or request.args.get('ente') == ente_nombre) %}
-        {% set lista = resultados.get(ente_nombre, []) %}
-        {% set tiene_duplicados = info.duplicados > 0 %}
-        {% set tipo_ente = info.tipo|default('ENTE') %}
+  <div class="export-bar">
+    <form id="filterForm" method="get" class="form-inline" action="{{ url_for('reporte_por_ente') }}">
+      <input type="hidden" name="ambito" value="{{ ambito_sel or 'estatales' }}">
+      <label for="selectEnte">
+        Filtrar por {% if (ambito_sel or 'estatales') == 'municipios' %}municipio{% else %}ente estatal{% endif %}:
+      </label>
+      <select name="ente" id="selectEnte">
+        <option value="">
+          {% if (ambito_sel or 'estatales') == 'municipios' %}Todos los municipios{% else %}Todos los entes estatales{% endif %}
+        </option>
+        {% for ente_nombre, info in entes_info.items() %}
+          <option value="{{ ente_nombre }}" {% if filtro_ente == ente_nombre %}selected{% endif %}>{{ ente_nombre }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-secondary">Aplicar</button>
+    </form>
+    <div class="search-area">
+      <input type="text" id="searchInput" placeholder="Buscar por RFC o nombre..." />
+    </div>
+  </div>
 
-        <section class="ente-bloque acordeon" data-tipo="{{ tipo_ente }}">
-          <div class="ente-nombre acordeon-header" style="cursor: pointer; display: flex; justify-content: space-between; align-items: center;">
-            <span style="display: flex; align-items: center; gap: 0.8rem;">
-              <span class="acordeon-icono">▶</span>
+  {% if entes_info %}
+    {% for ente_nombre, info in entes_info.items() %}
+      {% if not filtro_ente or filtro_ente == ente_nombre %}
+        {% set lista = resultados.get(ente_nombre, []) %}
+        {% set lista_trabajadores = trabajadores_por_ente.get(ente_nombre, []) %}
+        {% set tiene_duplicados = mostrar_duplicados and (lista|length > 0) %}
+
+        <section class="ente-bloque acordeon" data-tipo="{{ info.tipo }}">
+          <div class="acordeon-header">
+            <div class="ente-nombre">
+              <span class="acordeon-icono">⌄</span>
               <strong>{{ info.num }}. {{ ente_nombre }}</strong>
-            </span>
-            <span style="display: flex; gap: 1rem; align-items: center; font-size: 0.9rem;">
-              <span style="background: #e0f2fe; color: #0369a1; padding: 0.3rem 0.7rem; border-radius: 6px; font-weight: 600;">
-                {{ info.total }} trabajador{% if info.total != 1 %}es{% endif %}
+            </div>
+            <div style="display: flex; gap: var(--space-4); align-items: center;">
+              <span class="badge badge-info">
+                {{ info.total or 0 }} trabajador{% if (info.total or 0) != 1 %}es{% endif %}
               </span>
               {% if tiene_duplicados %}
-                <span style="background: #fef3c7; color: #92400e; padding: 0.3rem 0.7rem; border-radius: 6px; font-weight: 600;">
-                  {{ info.duplicados }} duplicado{% if info.duplicados != 1 %}s{% endif %}
+                <span class="badge badge-warning">
+                  {{ lista|length }} duplicado{% if (lista|length) != 1 %}s{% endif %}
                 </span>
               {% else %}
-                <span style="background: #d1fae5; color: #065f46; padding: 0.3rem 0.7rem; border-radius: 6px; font-weight: 600;">
-                  ✓ Sin duplicados
+                <span class="badge badge-success">
+                  {% if mostrar_duplicados %}
+                    ✓ Sin duplicados
+                  {% else %}
+                    ✓ Solo trabajadores procesados
+                  {% endif %}
                 </span>
               {% endif %}
-            </span>
+            </div>
           </div>
 
           <div class="acordeon-contenido" style="display: none;">
             {% if tiene_duplicados %}
+              <div style="margin: var(--space-5) 0 var(--space-3); font-weight: 600;">
+                Trabajadores duplicados en este ente
+              </div>
               <table class="tabla-resultados">
                 <thead>
                   <tr>
@@ -88,44 +200,122 @@
                     <th>Nombre</th>
                     <th>Puesto</th>
                     <th>Entes Duplicados</th>
+                    {% if es_luis %}
+                      <th>Pre-validación</th>
+                    {% endif %}
                   </tr>
                 </thead>
                 <tbody>
                   {% for r in lista %}
-                  <tr class="fila-result">
-                    <td>
-                      {% if r.rfc %}
-                        <a href="{{ url_for('resultados_por_rfc', rfc=r.rfc) }}" class="link-rfc">{{ r.rfc }}</a>
-                      {% else %}
-                        Sin RFC
+                    <tr class="fila-result search-row" data-search="{{ ((r.rfc or '') ~ ' ' ~ (r.nombre or ''))|lower|trim }}">
+                      <td>
+                        {% if r.rfc %}
+                          <a class="link-rfc" href="{{ url_for('resultados_por_rfc', rfc=r.rfc) }}">{{ r.rfc }}</a>
+                        {% else %}
+                          Sin RFC
+                        {% endif %}
+                      </td>
+                      <td>{{ r.nombre or 'Sin nombre' }}</td>
+                      <td>{{ r.puesto or 'Sin puesto' }}</td>
+                      <td>
+                        {% if r.entes %}
+                          {% for ente_dup in r.entes %}
+                            {% set estado_tag = r.estado_entes.get(ente_dup, r.estado) %}
+                            {% set badge_class = 'badge-neutral' %}
+                            {% set icono = '○' %}
+                            {% if estado_tag == 'Solventado' %}
+                              {% set badge_class = 'badge-success' %}
+                              {% set icono = '✓' %}
+                            {% elif estado_tag == 'No Solventado' %}
+                              {% set badge_class = 'badge-danger' %}
+                              {% set icono = '✗' %}
+                            {% endif %}
+                            <span class="badge {{ badge_class }}">{{ icono }} {{ ente_dup }}</span>
+                          {% endfor %}
+                        {% else %}
+                          <span class="badge badge-neutral">○ Sin entes duplicados</span>
+                        {% endif %}
+                      </td>
+                      {% if es_luis %}
+                        {% set pre_estado = r.pre_estado or 'Sin valoración' %}
+                        <td>
+                          <form class="prevalidacion-form" data-rfc="{{ r.rfc }}" data-ente="{{ r.ente_origen or ente_nombre }}">
+                            <label style="display:block; font-size:.85rem;">Estado</label>
+                            <select name="pre_estado" class="pre-estado" style="width:100%;">
+                              <option value="Sin valoración" {% if pre_estado == 'Sin valoración' %}selected{% endif %}>Sin valoración (cancelar solventación)</option>
+                              <option value="Solventado" {% if pre_estado == 'Solventado' %}selected{% endif %}>Solventado</option>
+                            </select>
+
+                            <div class="pre-catalogo-wrap" style="{% if pre_estado == 'Solventado' %}{% else %}display:none;{% endif %}">
+                              <label style="display:block; font-size:.85rem; margin-top:.35rem;">Solventación</label>
+                              <select name="pre_catalogo" class="pre-catalogo" style="width:100%;">
+                                {% for op in pre_catalogo_opciones %}
+                                  <option value="{{ op }}" {% if (r.pre_catalogo or '') == op %}selected{% endif %}>
+                                    {{ op if op else 'Selecciona una opción...' }}
+                                  </option>
+                                {% endfor %}
+                              </select>
+                            </div>
+
+                            <div class="pre-otro-wrap" style="{% if (r.pre_catalogo or '') == 'Otro' %}{% else %}display:none;{% endif %}">
+                              <label style="display:block; font-size:.85rem; margin-top:.35rem;">Otro</label>
+                              <textarea name="pre_otro_texto" class="pre-otro-texto" rows="2" style="width:100%;">{{ r.pre_otro_texto or '' }}</textarea>
+                            </div>
+
+                            <button type="submit" class="btn btn-secondary" style="margin-top:.35rem;">Guardar</button>
+                            <small class="prevalidacion-msg" style="display:block;"></small>
+                          </form>
+                        </td>
                       {% endif %}
-                    </td>
-                    <td>{{ r.nombre or 'Sin nombre' }}</td>
-                    <td>{{ r.puesto or 'Sin puesto' }}</td>
-                    <td>
-                      {% if r.entes %}
-                        {% for ente_dup in r.entes %}
-                          {% set estado_tag = r.estado_entes.get(ente_dup, r.estado) if r.estado_entes is defined else r.estado %}
-                          {% set color = (
-                            'verde' if estado_tag == 'Solventado' else
-                            'rojo' if estado_tag == 'No Solventado' else 'gris'
-                          ) %}
-                          <span class="tag-ente {{ color }}">{{ ente_dup }}</span>
-                        {% endfor %}
-                      {% else %}
-                        <span class="tag-ente gris">Sin entes duplicados</span>
-                      {% endif %}
-                    </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% endif %}
+
+            <div style="margin: var(--space-5) 0 var(--space-3); font-weight: 600;">
+              Trabajadores cargados en este ente
+            </div>
+            {% if lista_trabajadores %}
+              <table class="tabla-resultados">
+                <thead>
+                  <tr>
+                    <th>RFC</th>
+                    <th>Nombre</th>
+                    <th>Puesto</th>
+                    <th>Total Percepciones</th>
+                    <th>Quincenas</th>
                   </tr>
+                </thead>
+                <tbody>
+                  {% for trab in lista_trabajadores %}
+                    {% set qnas_trab = trab.qnas.keys()|list if trab.qnas is mapping else [] %}
+                    {% set qnas_label = qnas_trab|join(', ') if qnas_trab else '-' %}
+                    <tr class="search-row" data-search="{{ ((trab.rfc or '') ~ ' ' ~ (trab.nombre or ''))|lower|trim }}">
+                      <td>
+                        {% if trab.rfc %}
+                          <a class="link-rfc" href="{{ url_for('resultados_por_rfc', rfc=trab.rfc) }}">{{ trab.rfc }}</a>
+                        {% else %}
+                          Sin RFC
+                        {% endif %}
+                      </td>
+                      <td>{{ trab.nombre or 'Sin nombre' }}</td>
+                      <td>{{ trab.puesto or 'Sin puesto' }}</td>
+                      <td>
+                        {% if trab.monto is not none and trab.monto != '' %}
+                          {{ '{:,.0f}'.format(trab.monto|float) }} MXN
+                        {% else %}
+                          -
+                        {% endif %}
+                      </td>
+                      <td>{{ qnas_label }}</td>
+                    </tr>
                   {% endfor %}
                 </tbody>
               </table>
             {% else %}
-              <div style="padding: 2rem; text-align: center; color: #065f46; background: #ecfdf5; border-radius: 8px; margin: 1rem;">
-                <strong>✓ Este ente no presenta duplicidades</strong>
-                <p style="margin: 0.5rem 0 0 0; font-size: 0.9rem;">
-                  Se han procesado {{ info.total }} trabajador{% if info.total != 1 %}es{% endif %} sin incompatibilidades detectadas.
-                </p>
+              <div class="badge badge-neutral" style="display:block; padding:var(--space-6); margin:var(--space-4);">
+                Sin trabajadores cargados para este ente.
               </div>
             {% endif %}
           </div>
@@ -136,81 +326,4 @@
     <p class="msg-vacio">No hay datos cargados en el sistema.</p>
   {% endif %}
 </div>
-
-<!-- Script de búsqueda y acordeones -->
-<script>
-document.addEventListener("DOMContentLoaded", () => {
-  const input = document.getElementById("searchInput");
-  const acordeones = document.querySelectorAll(".acordeon");
-
-  // ============================================
-  // ACORDEONES: Toggle expandir/colapsar
-  // ============================================
-  acordeones.forEach(acordeon => {
-    const header = acordeon.querySelector(".acordeon-header");
-    const contenido = acordeon.querySelector(".acordeon-contenido");
-    const icono = acordeon.querySelector(".acordeon-icono");
-
-    header.addEventListener("click", (e) => {
-      // No toggle si se hace click en un link
-      if (e.target.tagName === "A") return;
-
-      const estaExpandido = contenido.style.display !== "none";
-
-      if (estaExpandido) {
-        contenido.style.display = "none";
-        icono.textContent = "▶";
-      } else {
-        contenido.style.display = "block";
-        icono.textContent = "▼";
-      }
-    });
-  });
-
-  // ============================================
-  // BÚSQUEDA POR RFC/NOMBRE
-  // ============================================
-  if (input) {
-    input.addEventListener("keyup", () => {
-      const filter = input.value.toLowerCase().trim();
-
-      acordeones.forEach(acordeon => {
-        const filas = acordeon.querySelectorAll(".fila-result");
-        let hayCoincidencias = false;
-
-        // Si no hay filas (ente sin duplicados), buscar en el nombre del ente
-        if (filas.length === 0) {
-          const nombreEnte = acordeon.querySelector(".ente-nombre").textContent.toLowerCase();
-          if (nombreEnte.includes(filter)) {
-            hayCoincidencias = true;
-          }
-        } else {
-          // Buscar en las filas de la tabla
-          filas.forEach(row => {
-            const text = row.textContent.toLowerCase();
-            if (text.includes(filter)) {
-              row.style.display = "";
-              hayCoincidencias = true;
-            } else {
-              row.style.display = "none";
-            }
-          });
-        }
-
-        // Mostrar/ocultar acordeón según coincidencias
-        if (filter === "" || hayCoincidencias) {
-          acordeon.style.display = "";
-          // Si hay búsqueda activa y hay coincidencias, expandir automáticamente
-          if (filter !== "" && hayCoincidencias) {
-            acordeon.querySelector(".acordeon-contenido").style.display = "block";
-            acordeon.querySelector(".acordeon-icono").textContent = "▼";
-          }
-        } else {
-          acordeon.style.display = "none";
-        }
-      });
-    });
-  }
-});
-</script>
 {% endblock %}

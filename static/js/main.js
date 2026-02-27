@@ -47,11 +47,24 @@ document.addEventListener("DOMContentLoaded", () => {
       uploadResult.hidden = true;
 
       try {
-        const res = await fetch(form.action, { method: "POST", body: formData });
-        const data = await res.json();
+        const res = await fetch(form.action, {
+          method: "POST",
+          body: formData,
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        });
 
         uploadStatus.hidden = true;
         uploadArea.style.display = "block";
+
+        // Check if response is JSON before parsing
+        const contentType = res.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          throw new Error("Sesión expirada o no autorizada. Por favor, inicia sesión nuevamente.");
+        }
+
+        const data = await res.json();
 
         if (!res.ok || data.error)
           throw new Error(data.error || `Error del servidor (${res.status})`);
@@ -70,8 +83,9 @@ document.addEventListener("DOMContentLoaded", () => {
         uploadResult.hidden = false;
         resultMessage.innerHTML = `
           <strong>${data.mensaje || "Procesamiento completado"}</strong><br>
-          <span>${data.total_resultados || 0} registros detectados.</span><br>
-          <span>${data.nuevos || 0} nuevos registros guardados.</span>
+          <span>${data.total_procesados || data.total_resultados || 0} registros procesados.</span><br>
+          <span>${data.insertados || data.nuevos || 0} nuevos registros guardados.</span><br>
+          <span>${data.actualizados || 0} registros actualizados.</span>
           ${alertasHTML}
         `;
       } catch (err) {
@@ -91,8 +105,83 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   // ===========================================================
-  // RESULTADOS — Exportaciones y validaciones simples
+  // RESULTADOS — Búsqueda en tiempo real y exportaciones
   // ===========================================================
+  // Accordion toggle functionality
+  const acordeonHeaders = document.querySelectorAll(".acordeon-header");
+  acordeonHeaders.forEach(header => {
+    header.addEventListener("click", () => {
+      const acordeon = header.closest(".ente-bloque.acordeon");
+      const contenido = acordeon.querySelector(".acordeon-contenido");
+      const icono = header.querySelector(".acordeon-icono");
+
+      if (contenido.style.display === "block") {
+        contenido.style.display = "none";
+        if (icono) icono.textContent = "▶";
+      } else {
+        contenido.style.display = "block";
+        if (icono) icono.textContent = "▼";
+      }
+    });
+  });
+
+  // Search functionality with accordion integration
+  function normalizeSearchText(text) {
+    return (text || "")
+      .toString()
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  const searchInput = document.getElementById("searchInput");
+  if (searchInput) {
+    const runSearch = () => {
+      const query = normalizeSearchText(searchInput.value);
+      const terms = query ? query.split(" ") : [];
+      const acordeones = document.querySelectorAll(".ente-bloque.acordeon");
+
+      acordeones.forEach(acordeon => {
+        const filas = acordeon.querySelectorAll("tr.search-row");
+        let hasVisibleRows = false;
+
+        filas.forEach(fila => {
+          const textoBusqueda = normalizeSearchText(fila.dataset.search || "");
+          const matches = terms.length === 0 || terms.every(term => textoBusqueda.includes(term));
+
+          if (matches) {
+            fila.style.display = "";
+            hasVisibleRows = true;
+          } else {
+            fila.style.display = "none";
+          }
+        });
+
+        // Show/hide accordion based on whether it has visible rows
+        if (query && filas.length > 0 && !hasVisibleRows) {
+          acordeon.style.display = "none";
+        } else {
+          acordeon.style.display = "";
+          // Auto-expand if search has results
+          if (query && hasVisibleRows) {
+            const contenido = acordeon.querySelector(".acordeon-contenido");
+            const icono = acordeon.querySelector(".acordeon-icono");
+            if (contenido) contenido.style.display = "block";
+            if (icono) icono.textContent = "▼";
+          } else if (!query) {
+            const icono = acordeon.querySelector(".acordeon-icono");
+            if (icono) icono.textContent = "▶";
+          }
+        }
+      });
+    };
+
+    searchInput.addEventListener("input", runSearch);
+    searchInput.addEventListener("search", runSearch);
+  }
+
   const selectEnte = document.getElementById("selectEnte");
   if (selectEnte) {
     const exportForm = selectEnte.closest("form");
@@ -103,6 +192,124 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   }
+
+  // Pre-validación de duplicados (solo para Luis)
+  const preForms = document.querySelectorAll(".prevalidacion-form");
+  preForms.forEach(form => {
+    const estadoEl = form.querySelector(".pre-estado");
+    const catalogoWrap = form.querySelector(".pre-catalogo-wrap");
+    const catalogoEl = form.querySelector(".pre-catalogo");
+    const otroWrap = form.querySelector(".pre-otro-wrap");
+    const otroEl = form.querySelector(".pre-otro-texto");
+
+    function syncPreFormVisibility() {
+      const estado = estadoEl ? estadoEl.value : "Sin valoración";
+      const muestraCatalogo = estado === "Solventado";
+      if (catalogoWrap) catalogoWrap.style.display = muestraCatalogo ? "" : "none";
+
+      const muestraOtro = muestraCatalogo && catalogoEl && catalogoEl.value === "Otro";
+      if (otroWrap) otroWrap.style.display = muestraOtro ? "" : "none";
+
+      if (!muestraCatalogo && catalogoEl) {
+        catalogoEl.value = "";
+      }
+      if (!muestraOtro && otroEl) {
+        otroEl.value = "";
+      }
+    }
+
+    if (estadoEl) {
+      estadoEl.addEventListener("change", () => {
+        syncPreFormVisibility();
+        if (estadoEl.value === "Sin valoración") {
+          form.requestSubmit();
+        }
+      });
+    }
+    if (catalogoEl) {
+      catalogoEl.addEventListener("change", () => {
+        syncPreFormVisibility();
+        if (estadoEl && estadoEl.value === "Solventado" && catalogoEl.value && catalogoEl.value !== "Otro") {
+          form.requestSubmit();
+        }
+      });
+    }
+    if (otroEl) {
+      otroEl.addEventListener("blur", () => {
+        if (
+          estadoEl &&
+          catalogoEl &&
+          estadoEl.value === "Solventado" &&
+          catalogoEl.value === "Otro" &&
+          otroEl.value.trim()
+        ) {
+          form.requestSubmit();
+        }
+      });
+    }
+    syncPreFormVisibility();
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (form.dataset.saving === "1") {
+        return;
+      }
+
+      const rfc = form.dataset.rfc || "";
+      const ente = form.dataset.ente || "";
+      const msg = form.querySelector(".prevalidacion-msg");
+      const estado = form.querySelector('select[name="pre_estado"]')?.value || "Sin valoración";
+      const catalogo = form.querySelector('select[name="pre_catalogo"]')?.value || "";
+      const otroTexto = form.querySelector('textarea[name="pre_otro_texto"]')?.value?.trim() || "";
+
+      if (!rfc || !ente) {
+        if (msg) msg.textContent = "Faltan datos RFC/ente.";
+        return;
+      }
+
+      if (estado === "Solventado" && !catalogo) {
+        if (msg) msg.textContent = "Selecciona una opción de catálogo.";
+        return;
+      }
+      if (catalogo === "Otro" && !otroTexto) {
+        if (msg) msg.textContent = "Escribe el texto para la opción Otro.";
+        return;
+      }
+
+      form.dataset.saving = "1";
+      if (msg) msg.textContent = "Guardando...";
+
+      try {
+        const res = await fetch("/prevalidar_duplicado", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            rfc,
+            ente,
+            estado,
+            catalogo,
+            otro_texto: otroTexto
+          })
+        });
+
+        const contentType = res.headers.get("content-type");
+        if (!contentType || !contentType.includes("application/json")) {
+          throw new Error("Respuesta inválida del servidor");
+        }
+
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || `Error ${res.status}`);
+        }
+
+        if (msg) msg.textContent = "✓ Pre-validación guardada";
+      } catch (error) {
+        if (msg) msg.textContent = "✗ " + error.message;
+      } finally {
+        form.dataset.saving = "0";
+      }
+    });
+  });
 
   // ===========================================================
   // CATÁLOGOS — Pestañas dinámicas
@@ -141,7 +348,8 @@ if (formSolv) {
     e.preventDefault();
     const rfc = formSolv.dataset.rfc;
     const estado = document.getElementById("estado").value;
-    const valoracion = document.getElementById("valoracion").value.trim();
+    const valoracionEl = document.getElementById("valoracion");
+    const valoracion = valoracionEl ? valoracionEl.value.trim() : "";
     const catalogo = document.getElementById("catalogo").value;
     const otroTexto = document.getElementById("otro_texto").value.trim();
     const ente = document.querySelector('input[name="ente"]')?.value || null;
@@ -171,6 +379,13 @@ if (formSolv) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rfc, estado, valoracion, catalogo, otro_texto: otroTexto, ente })
       });
+
+      // Check if response is JSON before parsing
+      const contentType = res.headers.get("content-type");
+      if (!contentType || !contentType.includes("application/json")) {
+        throw new Error("Sesión expirada o no autorizada. Por favor, inicia sesión nuevamente.");
+      }
+
       const data = await res.json();
 
       if (!res.ok || data.error)
@@ -202,4 +417,3 @@ if (formSolv) {
     });
   }
 });
-
