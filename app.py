@@ -123,7 +123,7 @@ def logout():
     usuario = session.get("usuario")
     session.clear()
     log.info("Logout usuario=%s", usuario)
-    return redirect("http://192.168.1.248/SIFEET-2025/")
+    return redirect(url_for("login"))
 
 # -----------------------------------------------------------
 # DASHBOARD
@@ -264,12 +264,28 @@ def _construir_detalle_solventados(resultados, filtro_ente, ambito_sel, entes_us
     registros_solventados = set()
     detalle_agrupado = {}
 
+    def _monto_num(v):
+        try:
+            txt = str(v or "").strip().replace(",", "").replace("$", "")
+            txt = txt.replace("MXN", "").replace("mxn", "").strip()
+            return float(txt) if txt else 0.0
+        except Exception:
+            return 0.0
+
     rfcs = sorted({str(r.get("rfc", "")).strip().upper() for r in resultados if str(r.get("rfc", "")).strip()})
     prevalidaciones_por_rfc = db_manager.get_prevalidaciones_por_rfcs(rfcs)
 
     for r in resultados:
         rfc_actual = str(r.get("rfc", "")).strip().upper()
         mapa_pre = prevalidaciones_por_rfc.get(rfc_actual, {})
+        monto_por_ente = {}
+        for reg in (r.get("registros") or []):
+            ente_reg = reg.get("ente")
+            ente_key = db_manager.normalizar_ente_clave(ente_reg) or str(ente_reg or "").strip()
+            if not ente_key:
+                continue
+            monto_por_ente[ente_key] = monto_por_ente.get(ente_key, 0.0) + _monto_num(reg.get("monto"))
+
         for ente_clave in (r.get("entes") or []):
             if not _puede_ver_ente(ente_clave, entes_usuario, modo_permiso):
                 continue
@@ -305,10 +321,15 @@ def _construir_detalle_solventados(resultados, filtro_ente, ambito_sel, entes_us
                     "motivo": motivo,
                     "observacion": comentario,
                     "entes": set(),
+                    "entes_clave": set(),
+                    "total_percepciones_anuales": 0.0,
                 }
             if not detalle_agrupado[key]["observacion"] and comentario:
                 detalle_agrupado[key]["observacion"] = comentario
             detalle_agrupado[key]["entes"].add(display)
+            if clave_norm not in detalle_agrupado[key]["entes_clave"]:
+                detalle_agrupado[key]["entes_clave"].add(clave_norm)
+                detalle_agrupado[key]["total_percepciones_anuales"] += monto_por_ente.get(clave_norm, 0.0)
 
     detalle = []
     for item in detalle_agrupado.values():
@@ -319,6 +340,7 @@ def _construir_detalle_solventados(resultados, filtro_ente, ambito_sel, entes_us
             "ente": ", ".join(entes),
             "motivo": item["motivo"],
             "observacion": item["observacion"],
+            "total_percepciones_anuales": item["total_percepciones_anuales"],
         })
     detalle.sort(key=lambda x: (x["rfc"], x["motivo"]))
 
@@ -363,7 +385,7 @@ def reporte_por_ente():
     es_validador = _es_usuario_validador()
     resultados_validados = db_manager.resultados_validados()
     mostrar_duplicados = es_luis or resultados_validados
-    mostrar_metricas = es_validador or resultados_validados
+    mostrar_metricas = es_validador
     modo_permiso = "ALL" if es_luis else _allowed_all(entes_usuario)
 
     resultados_base = db_manager.obtener_cruces_reales()
@@ -856,28 +878,38 @@ def exportar_excel_general():
     # Filtrar registros con N/A en Quincenas (sin intersección temporal)
     filas = [f for f in filas if f.get("Quincenas") != "N/A"]
 
-    # Respetar visibilidad por usuario: no exportar entes/municipios fuera de su cargo.
+    exporta_json = (formato == "json" or request.is_json)
+
+    # Respetar visibilidad por usuario:
+    # - incluir filas cuando el Ente Origen esté a su cargo, o bien cuando
+    #   exista al menos un Ente Incompatibilidad relacionado con su cargo.
+    # - excluir filas sin relación con los entes del usuario.
+    # - en JSON conservar filtro por visibilidad para Entes Incompatibilidad.
+    # - en Excel conservar la lista completa de Entes Incompatibilidad.
     if not es_luis:
         filas_visibles = []
         for fila in filas:
             ente_origen = str(fila.get("Ente Origen", "")).strip()
-            if not _puede_ver_ente(ente_origen, entes_usuario, modo_permiso):
-                continue
-
             entes_incompat = [
                 e.strip()
                 for e in str(fila.get("Entes Incompatibilidad", "")).split(",")
                 if e.strip()
             ]
-            entes_incompat_visibles = [
+            origen_visible = _puede_ver_ente(ente_origen, entes_usuario, modo_permiso)
+            incompat_visibles = [
                 e for e in entes_incompat
                 if _puede_ver_ente(e, entes_usuario, modo_permiso)
             ]
+            fila_relacionada = origen_visible or bool(incompat_visibles)
+            if not fila_relacionada:
+                continue
 
             fila_segura = dict(fila)
-            fila_segura["Entes Incompatibilidad"] = (
-                ", ".join(entes_incompat_visibles) if entes_incompat_visibles else "Sin otros entes"
-            )
+            if exporta_json:
+                fila_segura["Entes Incompatibilidad"] = (
+                    ", ".join(incompat_visibles) if incompat_visibles else "Sin otros entes"
+                )
+
             filas_visibles.append(fila_segura)
 
         filas = filas_visibles
@@ -885,7 +917,7 @@ def exportar_excel_general():
     if not filas:
         return jsonify({"error": "Sin datos para exportar."}), 404
 
-    if formato == "json" or request.is_json:
+    if exporta_json:
         return jsonify({"total_registros": len(filas), "datos": filas})
 
     df = pd.DataFrame(filas)[[
@@ -919,53 +951,59 @@ def exportar_solventados():
         ambito_sel = "estatales"
 
     resultados = _filtrar_duplicados_reales(db_manager.obtener_cruces_reales())
-    detalle = _construir_detalle_solventados(
-        resultados,
-        filtro_ente,
-        ambito_sel,
-        session.get("entes", []),
-        "ALL",
-    )["detalle"]
-
     filas_general = _construir_filas_export(resultados)
-    qnas_por_rfc_ente = {}
-    for fila in filas_general:
-        qnas_txt = str(fila.get("Quincenas", "")).strip()
-        if not qnas_txt or qnas_txt == "N/A":
-            continue
-        rfc_key = str(fila.get("RFC", "")).strip().upper()
-        ente_key = str(fila.get("Ente Origen", "")).strip()
-        if not rfc_key or not ente_key:
-            continue
-        qnas_por_rfc_ente.setdefault((rfc_key, ente_key), set()).add(qnas_txt)
+    filas_general = [f for f in filas_general if f.get("Quincenas") != "N/A"]
+
+    rfcs = sorted({
+        str(f.get("RFC", "")).strip().upper()
+        for f in filas_general
+        if str(f.get("RFC", "")).strip()
+    })
+    prevalidaciones_por_rfc = db_manager.get_prevalidaciones_por_rfcs(rfcs)
 
     filas = []
-    for item in detalle:
-        rfc_item = str(item.get("rfc", "")).strip().upper()
-        entes_item = [e.strip() for e in str(item.get("ente", "")).split(",") if e.strip()]
-        qnas_item = set()
-        for ente in entes_item:
-            qnas_item.update(qnas_por_rfc_ente.get((rfc_item, ente), set()))
-        quincenas_incompat = ", ".join(sorted(qnas_item)) if qnas_item else "N/A"
+    for fila in filas_general:
+        rfc = str(fila.get("RFC", "")).strip().upper()
+        ente_origen = str(fila.get("Ente Origen", "")).strip()
+        if not rfc or not ente_origen:
+            continue
+        if filtro_ente and ente_origen != filtro_ente:
+            continue
+        if not _coincide_ambito(ambito_sel, _tipo_ente(ente_origen)):
+            continue
+
+        ente_clave = db_manager.normalizar_ente_clave(ente_origen) or ente_origen
+        pre = prevalidaciones_por_rfc.get(rfc, {}).get(ente_clave, {})
+        pre_estado = str(pre.get("estado", "Sin valoración")).strip().upper()
+        if pre_estado != "SOLVENTADO":
+            continue
 
         filas.append({
-            "RFC": item["rfc"],
-            "Nombre": item["nombre"],
-            "Ente Origen": item["ente"],
-            "Estatus": "Solventado",
-            "Motivo de Solventación": item["motivo"],
-            "Observación": item["observacion"],
-            "Quincenas de incompatibilidad": quincenas_incompat,
+            "RFC": fila.get("RFC", ""),
+            "Nombre": fila.get("Nombre", ""),
+            "Puesto": fila.get("Puesto", ""),
+            "Ente Origen": fila.get("Ente Origen", ""),
+            "Fecha Alta": fila.get("Fecha Alta", ""),
+            "Fecha Baja": fila.get("Fecha Baja", ""),
+            "Total Percepciones Anual": fila.get("Total Percepciones", ""),
+            "Entes Incompatibilidad": fila.get("Entes Incompatibilidad", ""),
+            "Quincenas Cruce": fila.get("Quincenas", ""),
+            "Estatus": fila.get("Estatus", ""),
+            "Solventacion": fila.get("Solventación", ""),
         })
 
     df = pd.DataFrame(filas, columns=[
         "RFC",
         "Nombre",
+        "Puesto",
         "Ente Origen",
+        "Entes Incompatibilidad",
+        "Fecha Alta",
+        "Fecha Baja",
+        "Total Percepciones Anual",
+        "Quincenas Cruce",
         "Estatus",
-        "Motivo de Solventación",
-        "Observación",
-        "Quincenas de incompatibilidad",
+        "Solventacion",
     ])
     df.sort_values(by=["RFC", "Ente Origen"], inplace=True)
 

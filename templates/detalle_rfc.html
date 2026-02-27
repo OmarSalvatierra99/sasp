@@ -13,7 +13,7 @@
       <tr>
         <th>Ente Incompatibilidad</th>
         <th>Puesto</th>
-        <th>Total Percepciones</th>
+        <th>Total Percepciones Anuales</th>
         <th>Quincenas</th>
         <th>Fecha Alta</th>
         <th>Fecha Baja</th>
@@ -39,8 +39,9 @@
           <td>{{ db_manager.normalizar_ente(r.ente) or r.ente or 'Desconocido' }}</td>
           <td>{{ r.puesto or 'Sin puesto' }}</td>
           <td>
-            {% if r.monto %}
-              {{ "MXN {:,.2f}".format(r.monto|float) }}
+            {% if r.monto is not none and r.monto != '' %}
+              {% set monto_num = (r.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
+              {{ "MXN {:,.2f}".format(monto_num) }}
             {% else %}-{% endif %}
           </td>
           <td>
@@ -91,4 +92,3 @@
   </div>
 </div>
 {% endblock %}
-

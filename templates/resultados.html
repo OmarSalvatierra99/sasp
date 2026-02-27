@@ -21,7 +21,7 @@
         {% if mostrar_duplicados %}
           Cruces y duplicidades detectadas por ente
         {% else %}
-          Vista previa: solo trabajadores procesados (duplicados ocultos hasta validación)
+          La exportación general permanecerá habilitada conforme al estado de validación.
         {% endif %}
       </span>
     </div>
@@ -41,7 +41,7 @@
     </div>
   {% endif %}
 
-  {% if mostrar_metricas %}
+  {% if (session.get('usuario', '')|lower) == 'luis' %}
     <section style="margin-bottom:var(--space-6);">
       <h3 style="margin:0 0 var(--space-4);">Resumen de Auditoría</h3>
       <table class="tabla-resultados">
@@ -61,10 +61,6 @@
         </tbody>
       </table>
     </section>
-  {% else %}
-    <div class="badge badge-neutral" style="display:block; padding:var(--space-6); margin-bottom:var(--space-6);">
-      Las métricas se habilitan cuando se validen los resultados.
-    </div>
   {% endif %}
 
   {% if es_luis %}
@@ -103,6 +99,7 @@
               <th>RFC</th>
               <th>Nombre</th>
               <th>Ente</th>
+              <th>Total Percepciones Anuales</th>
               <th>Opción de solventación</th>
             </tr>
           </thead>
@@ -112,6 +109,7 @@
                 <td>{{ item.rfc }}</td>
                 <td>{{ item.nombre }}</td>
                 <td>{{ item.ente }}</td>
+                <td>{{ "MXN {:,.2f}".format((item.total_percepciones_anuales or 0)|float) }}</td>
                 <td>{{ item.motivo }}</td>
               </tr>
             {% endfor %}
@@ -283,7 +281,7 @@
                     <th>RFC</th>
                     <th>Nombre</th>
                     <th>Puesto</th>
-                    <th>Total Percepciones</th>
+                    <th>Total Percepciones Anuales</th>
                     <th>Quincenas</th>
                   </tr>
                 </thead>
@@ -303,7 +301,8 @@
                       <td>{{ trab.puesto or 'Sin puesto' }}</td>
                       <td>
                         {% if trab.monto is not none and trab.monto != '' %}
-                          {{ '{:,.0f}'.format(trab.monto|float) }} MXN
+                          {% set monto_num = (trab.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
+                          {{ '{:,.2f}'.format(monto_num) }} MXN
                         {% else %}
                           -
                         {% endif %}
