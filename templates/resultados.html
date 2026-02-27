@@ -281,7 +281,9 @@
                     <th>RFC</th>
                     <th>Nombre</th>
                     <th>Puesto</th>
-                    <th>Total Percepciones Anuales</th>
+                    {% if es_luis %}
+                      <th>Total Percepciones Anuales</th>
+                    {% endif %}
                     <th>Quincenas</th>
                   </tr>
                 </thead>
@@ -299,14 +301,16 @@
                       </td>
                       <td>{{ trab.nombre or 'Sin nombre' }}</td>
                       <td>{{ trab.puesto or 'Sin puesto' }}</td>
-                      <td>
-                        {% if trab.monto is not none and trab.monto != '' %}
-                          {% set monto_num = (trab.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
-                          {{ '{:,.2f}'.format(monto_num) }} MXN
-                        {% else %}
-                          -
-                        {% endif %}
-                      </td>
+                      {% if es_luis %}
+                        <td>
+                          {% if trab.monto is not none and trab.monto != '' %}
+                            {% set monto_num = (trab.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
+                            {{ '{:,.2f}'.format(monto_num) }} MXN
+                          {% else %}
+                            -
+                          {% endif %}
+                        </td>
+                      {% endif %}
                       <td>{{ qnas_label }}</td>
                     </tr>
                   {% endfor %}

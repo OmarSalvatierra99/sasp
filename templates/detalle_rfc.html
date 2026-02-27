@@ -13,7 +13,9 @@
       <tr>
         <th>Ente Incompatibilidad</th>
         <th>Puesto</th>
-        <th>Total Percepciones Anuales</th>
+        {% if es_luis %}
+          <th>Total Percepciones Anuales</th>
+        {% endif %}
         <th>Quincenas</th>
         <th>Fecha Alta</th>
         <th>Fecha Baja</th>
@@ -38,12 +40,14 @@
         <tr>
           <td>{{ db_manager.normalizar_ente(r.ente) or r.ente or 'Desconocido' }}</td>
           <td>{{ r.puesto or 'Sin puesto' }}</td>
-          <td>
-            {% if r.monto is not none and r.monto != '' %}
-              {% set monto_num = (r.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
-              {{ "MXN {:,.2f}".format(monto_num) }}
-            {% else %}-{% endif %}
-          </td>
+          {% if es_luis %}
+            <td>
+              {% if r.monto is not none and r.monto != '' %}
+                {% set monto_num = (r.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
+                {{ "MXN {:,.2f}".format(monto_num) }}
+              {% else %}-{% endif %}
+            </td>
+          {% endif %}
           <td>
             {% if activo_total %}
               <span class="activo-total">Activo en todo el ejercicio</span>

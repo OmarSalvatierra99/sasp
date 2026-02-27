@@ -8,6 +8,7 @@ from flask import (
     Flask, render_template, request, redirect,
     url_for, session, jsonify, send_file, send_from_directory
 )
+from werkzeug.exceptions import RequestEntityTooLarge
 import os
 import logging
 import pandas as pd
@@ -53,6 +54,7 @@ log = logging.getLogger("SCIL")
 # -----------------------------------------------------------
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "ofs_sasp_2025")
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_CONTENT_LENGTH", 50 * 1024 * 1024))
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("SCIL_DB", str(BASE_DIR / "scil.db"))
@@ -77,6 +79,17 @@ def verificar_autenticacion():
         if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
             return jsonify({"error": "Sesión expirada o no autorizada"}), 403
         return redirect(url_for("login"))
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def manejar_archivo_muy_grande(_error):
+    msg = (
+        "El archivo o conjunto de archivos excede el límite permitido de carga "
+        f"({app.config['MAX_CONTENT_LENGTH'] // (1024 * 1024)} MB)."
+    )
+    if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return jsonify({"error": msg}), 413
+    return msg, 413
 
 # -----------------------------------------------------------
 # LOGIN / LOGOUT
@@ -123,7 +136,7 @@ def logout():
     usuario = session.get("usuario")
     session.clear()
     log.info("Logout usuario=%s", usuario)
-    return redirect(url_for("login"))
+    return redirect("http://192.168.1.248/SIFEET-2025/")
 
 # -----------------------------------------------------------
 # DASHBOARD
@@ -140,11 +153,11 @@ def upload_laboral():
     if not session.get("autenticado"):
         return jsonify({"error": "No autorizado"}), 403
 
-    files = request.files.getlist("files")
-    if not files:
-        return jsonify({"error": "No se enviaron archivos"})
-
     try:
+        files = request.files.getlist("files")
+        if not files:
+            return jsonify({"error": "No se enviaron archivos"})
+
         nombres = [getattr(f, "filename", "archivo.xlsx") for f in files]
         log.info("Upload recibido: %s", nombres)
 
@@ -838,12 +851,22 @@ def exportar_por_ente():
         return jsonify({"error": "No se encontraron registros para el ente seleccionado."}), 404
 
     if formato == "json" or request.is_json:
+        if not es_luis:
+            for fila in filas:
+                fila.pop("Total Percepciones", None)
         return jsonify({"ente": ente_sel, "total_registros": len(filas), "datos": filas})
 
-    df = pd.DataFrame(filas)[[
-        "RFC", "Nombre", "Puesto", "Fecha Alta", "Fecha Baja", "Total Percepciones",
+    columnas_export = [
+        "RFC", "Nombre", "Puesto", "Fecha Alta", "Fecha Baja",
         "Ente Origen", "Entes Incompatibilidad", "Quincenas", "Estatus", "Solventación"
-    ]]
+    ]
+    if es_luis:
+        columnas_export.append("Total Percepciones")
+    else:
+        for fila in filas:
+            fila.pop("Total Percepciones", None)
+
+    df = pd.DataFrame(filas)[columnas_export]
     df.sort_values(by=["Ente Origen", "RFC"], inplace=True)
 
     output = BytesIO()
@@ -918,13 +941,26 @@ def exportar_excel_general():
         return jsonify({"error": "Sin datos para exportar."}), 404
 
     if exporta_json:
+        if not es_luis:
+            for fila in filas:
+                fila.pop("Total Percepciones", None)
         return jsonify({"total_registros": len(filas), "datos": filas})
 
-    df = pd.DataFrame(filas)[[
-        "RFC", "Nombre", "Puesto", "Fecha Alta", "Fecha Baja", "Total Percepciones",
+    columnas_export = [
+        "RFC", "Nombre", "Puesto", "Fecha Alta", "Fecha Baja",
         "Ente Origen", "Entes Incompatibilidad", "Quincenas", "Estatus", "Solventación"
-    ]]
-    df.rename(columns={"Total Percepciones": "Total de Percepciones Anual"}, inplace=True)
+    ]
+    if es_luis:
+        columnas_export.append("Total Percepciones")
+    else:
+        for fila in filas:
+            fila.pop("Total Percepciones", None)
+
+    df = pd.DataFrame(filas)[columnas_export]
+    if es_luis:
+        df.rename(columns={"Total Percepciones": "Total de Percepciones Anual"}, inplace=True)
+    else:
+        df["Importe por cuantificar por auditor"] = ""
     df.sort_values(by=["RFC", "Ente Origen"], inplace=True)
 
     output = BytesIO()
@@ -1000,10 +1036,10 @@ def exportar_solventados():
         "Entes Incompatibilidad",
         "Fecha Alta",
         "Fecha Baja",
-        "Total Percepciones Anual",
         "Quincenas Cruce",
         "Estatus",
         "Solventacion",
+        "Total Percepciones Anual",
     ])
     df.sort_values(by=["RFC", "Ente Origen"], inplace=True)
 

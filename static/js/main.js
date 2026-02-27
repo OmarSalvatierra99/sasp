@@ -50,6 +50,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const res = await fetch(form.action, {
           method: "POST",
           body: formData,
+          credentials: "same-origin",
           headers: {
             'X-Requested-With': 'XMLHttpRequest'
           }
@@ -58,16 +59,25 @@ document.addEventListener("DOMContentLoaded", () => {
         uploadStatus.hidden = true;
         uploadArea.style.display = "block";
 
-        // Check if response is JSON before parsing
         const contentType = res.headers.get("content-type");
-        if (!contentType || !contentType.includes("application/json")) {
-          throw new Error("Sesión expirada o no autorizada. Por favor, inicia sesión nuevamente.");
+        let data = null;
+        if (contentType && contentType.includes("application/json")) {
+          data = await res.json();
         }
 
-        const data = await res.json();
+        if (!res.ok) {
+          if (data && data.error) throw new Error(data.error);
+          if (res.status === 401 || res.status === 403) {
+            throw new Error("Sesión expirada o no autorizada. Por favor, inicia sesión nuevamente.");
+          }
+          if (res.status === 413) {
+            throw new Error("Los archivos exceden el tamaño máximo permitido.");
+          }
+          throw new Error(`Error del servidor (${res.status})`);
+        }
 
-        if (!res.ok || data.error)
-          throw new Error(data.error || `Error del servidor (${res.status})`);
+        if (data && data.error) throw new Error(data.error);
+        if (!data) throw new Error("Respuesta inválida del servidor.");
 
         // Mostrar alertas si existen
         let alertasHTML = '';
