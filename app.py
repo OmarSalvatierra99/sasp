@@ -1,7 +1,7 @@
 # ===========================================================
 # app.py — SASP / SCIL 2025
 # Sistema de Auditoría de Servicios Personales
-# Órgano de Fiscalización Superior del Estado de Tlaxcala
+# Órgano de Fiscalización Superior del Congreso del Estado de Tlaxcala
 # ===========================================================
 
 from flask import (
@@ -136,7 +136,7 @@ def logout():
     usuario = session.get("usuario")
     session.clear()
     log.info("Logout usuario=%s", usuario)
-    return redirect("http://192.168.1.248/SIFEET-2025/")
+    return redirect(url_for("login"))
 
 # -----------------------------------------------------------
 # DASHBOARD

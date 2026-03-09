@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import unicodedata
 from collections import defaultdict
 from datetime import date, datetime
 from functools import lru_cache
@@ -25,16 +26,27 @@ _ENTE_ALIAS_MAP = {
     "SECRETARIADEFINANZAS": "SF",
 }
 
+_LEADING_NUM_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)*\s*[\.\)\-:]?\s*")
+
 
 def _strip_accents_upper(s):
     out = str(s or "").strip().upper()
-    for a, b in zip("ÁÉÍÓÚ", "AEIOU"):
-        out = out.replace(a, b)
-    return out
+    if not out:
+        return ""
+    decomposed = unicodedata.normalize("NFD", out)
+    return "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+
+
+def _strip_numeric_prefix(text):
+    if not text:
+        return text
+    cleaned = _LEADING_NUM_PREFIX_RE.sub("", text).strip()
+    return cleaned or text
 
 
 def _normalize_ente_alias(s):
     text = _strip_accents_upper(s)
+    text = _strip_numeric_prefix(text)
     compact = re.sub(r"[^A-Z0-9]", "", text)
     if text in _ENTE_ALIAS_MAP:
         return _ENTE_ALIAS_MAP[text]
@@ -1426,9 +1438,13 @@ def _entes_cache():
     data = {}
     for r in cur.fetchall():
         clave = _sanitize_text(r["clave"])
+        siglas_raw = str(r["siglas"] or "").strip()
+        nombre_raw = str(r["nombre"] or "").strip()
         data[clave] = {
-            "siglas": _sanitize_text(r["siglas"]),
-            "nombre": _sanitize_text(r["nombre"]),
+            "siglas": _sanitize_text(siglas_raw),
+            "nombre": _sanitize_text(nombre_raw),
+            "siglas_raw": siglas_raw,
+            "nombre_raw": nombre_raw,
             "tipo": r["tipo"]
         }
 
@@ -1461,7 +1477,7 @@ def _ente_sigla(clave):
     s = _sanitize_text(clave)
     for k, d in _entes_cache().items():
         if s in {k, d["siglas"], d["nombre"]}:
-            return d["siglas"] or d["nombre"] or s
+            return d.get("siglas_raw") or d.get("nombre_raw") or d["siglas"] or d["nombre"] or s
     return s
 
 
@@ -1471,7 +1487,7 @@ def _ente_display(v):
     s = _sanitize_text(v)
     for k, d in _entes_cache().items():
         if s in {k, d["siglas"], d["nombre"]}:
-            return d["siglas"] or d["nombre"] or v
+            return d.get("siglas_raw") or d.get("nombre_raw") or d["siglas"] or d["nombre"] or v
     return v
 
 
