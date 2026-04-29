@@ -230,6 +230,17 @@ class DatabaseManager:
                 actualizado_por TEXT,
                 UNIQUE(rfc, ente, dia_semana)
             );
+
+            CREATE TABLE IF NOT EXISTS observaciones_beta (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rfc TEXT NOT NULL,
+                ente TEXT NOT NULL,
+                observacion TEXT NOT NULL,
+                estatus TEXT NOT NULL DEFAULT 'Borrador',
+                actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                actualizado_por TEXT,
+                UNIQUE(rfc, ente)
+            );
         """)
         conn.commit()
 
@@ -270,6 +281,10 @@ class DatabaseManager:
                 ON horarios_laborales(ente);
             CREATE INDEX IF NOT EXISTS idx_horarios_laborales_rfc_ente
                 ON horarios_laborales(rfc, ente);
+            CREATE INDEX IF NOT EXISTS idx_observaciones_beta_rfc
+                ON observaciones_beta(rfc);
+            CREATE INDEX IF NOT EXISTS idx_observaciones_beta_rfc_ente
+                ON observaciones_beta(rfc, ente);
         """)
 
     def _invalidate_catalog_cache(self):
@@ -603,6 +618,58 @@ class DatabaseManager:
                 "actualizado_por": row["actualizado_por"] or "",
             })
         return dict(horarios)
+
+    def guardar_observacion_beta(self, rfc, ente, observacion, estatus="Borrador", usuario=""):
+        rfc_norm = str(rfc or "").strip().upper()
+        ente_norm = self.normalizar_ente_clave(ente) or str(ente or "").strip()
+        observacion_txt = str(observacion or "").strip()
+        estatus_txt = str(estatus or "Borrador").strip() or "Borrador"
+        if not rfc_norm or not ente_norm:
+            return 0
+
+        conn = self._connect()
+        cur = conn.cursor()
+        if observacion_txt:
+            cur.execute("""
+                INSERT INTO observaciones_beta (rfc, ente, observacion, estatus, actualizado, actualizado_por)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                ON CONFLICT(rfc, ente) DO UPDATE SET
+                    observacion=excluded.observacion,
+                    estatus=excluded.estatus,
+                    actualizado=CURRENT_TIMESTAMP,
+                    actualizado_por=excluded.actualizado_por
+            """, (rfc_norm, ente_norm, observacion_txt, estatus_txt, usuario))
+            filas = cur.rowcount
+        else:
+            cur.execute("DELETE FROM observaciones_beta WHERE rfc=? AND ente=?", (rfc_norm, ente_norm))
+            filas = cur.rowcount
+        conn.commit()
+        conn.close()
+        return filas
+
+    def get_observaciones_beta_por_rfc(self, rfc):
+        rfc_norm = str(rfc or "").strip().upper()
+        if not rfc_norm:
+            return {}
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ente, observacion, estatus, actualizado, actualizado_por
+            FROM observaciones_beta
+            WHERE rfc=?
+        """, (rfc_norm,))
+        rows = cur.fetchall()
+        conn.close()
+        return {
+            row["ente"]: {
+                "observacion": row["observacion"] or "",
+                "estatus": row["estatus"] or "Borrador",
+                "actualizado": row["actualizado"],
+                "actualizado_por": row["actualizado_por"] or "",
+            }
+            for row in rows
+        }
 
     # -------------------------------------------------------
     # Resultados laborales

@@ -35,6 +35,24 @@
     {% endif %}
   </header>
 
+  <section class="stage-summary-grid" style="margin-bottom: var(--space-6);">
+    <article class="metric-card">
+      <span class="metric-label">Entes visibles</span>
+      <strong>{{ resumen.entes_visibles or 0 }}</strong>
+      <small>Según el ámbito y permisos activos</small>
+    </article>
+    <article class="metric-card">
+      <span class="metric-label">RFC analizados</span>
+      <strong>{{ resumen.trabajadores_procesados or 0 }}</strong>
+      <small>Trabajadores únicos visibles</small>
+    </article>
+    <article class="metric-card">
+      <span class="metric-label">Casos con duplicidad</span>
+      <strong>{{ resumen.duplicados_detectados or 0 }}</strong>
+      <small>RFC con cruce real en el ámbito actual</small>
+    </article>
+  </section>
+
   {% if validacion_error %}
     <div class="badge badge-danger" style="display: block; padding: var(--space-6); margin-bottom: var(--space-6);">
       {{ validacion_error_msg or 'No fue posible validar los datos.' }}
@@ -213,6 +231,10 @@
                     <th>RFC</th>
                     <th>Nombre</th>
                     <th>Puesto</th>
+                    <th>Vista multi-ente</th>
+                    {% if es_luis %}
+                      <th>Monto PDP</th>
+                    {% endif %}
                     <th>Entes Duplicados</th>
                     {% if es_luis %}
                       <th>Pre-validación</th>
@@ -231,6 +253,16 @@
                       </td>
                       <td>{{ r.nombre or 'Sin nombre' }}</td>
                       <td>{{ r.puesto or 'Sin puesto' }}</td>
+                      <td>
+                        <div class="entity-stack">
+                          {% for ente_full in r.entes_completos %}
+                            <span class="entity-pill">{{ ente_full }}</span>
+                          {% endfor %}
+                        </div>
+                      </td>
+                      {% if es_luis %}
+                        <td>{{ "MXN {:,.2f}".format(r.monto_pdp or 0) }}</td>
+                      {% endif %}
                       <td>
                         {% if r.entes %}
                           {% for ente_dup in r.entes %}
@@ -299,6 +331,7 @@
                     <th>Puesto</th>
                     {% if es_luis %}
                       <th>Total Percepciones Anuales</th>
+                      <th>Monto PDP</th>
                     {% endif %}
                     <th>Quincenas</th>
                   </tr>
@@ -322,6 +355,14 @@
                           {% if trab.monto is not none and trab.monto != '' %}
                             {% set monto_num = (trab.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
                             {{ '{:,.2f}'.format(monto_num) }} MXN
+                          {% else %}
+                            -
+                          {% endif %}
+                        </td>
+                        <td>
+                          {% if trab.monto is not none and trab.monto != '' %}
+                            {% set monto_num = (trab.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
+                            {{ '{:,.2f}'.format((monto_num / 365)) }} MXN
                           {% else %}
                             -
                           {% endif %}

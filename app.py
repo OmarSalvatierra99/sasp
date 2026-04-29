@@ -322,6 +322,11 @@ def _weekly_amount(value):
     return round(monto / 52.0, 2) if monto else 0.0
 
 
+def _pdp_amount(value):
+    monto = _monto_num(value)
+    return round(monto / 365.0, 2) if monto else 0.0
+
+
 def _time_to_minutes(value):
     text = str(value or "").strip()
     if not text or ":" not in text:
@@ -356,16 +361,20 @@ def _can_edit_ente(ente_ref):
 
 def _build_horarios_stage(rfc, registros):
     horarios_guardados = db_manager.get_horarios_por_rfc(rfc)
+    observaciones_beta = db_manager.get_observaciones_beta_por_rfc(rfc)
     per_ente = []
     total_weekly = 0.0
     total_annual = 0.0
+    total_pdp = 0.0
 
     for reg in registros or []:
         ente_clave = db_manager.normalizar_ente_clave(reg.get("ente")) or reg.get("ente")
         annual_amount = _monto_num(reg.get("monto"))
         weekly_amount = _weekly_amount(reg.get("monto"))
+        pdp_amount = _pdp_amount(reg.get("monto"))
         total_annual += annual_amount
         total_weekly += weekly_amount
+        total_pdp += pdp_amount
 
         day_rows = {day_number: {"hora_inicio": "", "hora_fin": "", "observaciones": ""} for day_number, _ in WEEK_DAYS}
         weekly_minutes = 0
@@ -390,9 +399,12 @@ def _build_horarios_stage(rfc, registros):
             "puesto": reg.get("puesto") or "Sin puesto",
             "annual_amount": annual_amount,
             "weekly_amount": weekly_amount,
+            "pdp_amount": pdp_amount,
             "weekly_minutes": weekly_minutes,
             "weekly_hours_label": _format_minutes(weekly_minutes),
             "can_edit": _can_edit_ente(ente_clave),
+            "beta_observacion": (observaciones_beta.get(ente_clave) or {}).get("observacion", ""),
+            "beta_estatus": (observaciones_beta.get(ente_clave) or {}).get("estatus", "Borrador"),
             "days": [
                 {
                     "number": day_number,
@@ -431,6 +443,7 @@ def _build_horarios_stage(rfc, registros):
         "conflicts": conflicts,
         "total_weekly": round(total_weekly, 2),
         "total_annual": round(total_annual, 2),
+        "total_pdp": round(total_pdp, 2),
         "has_complete_schedule": any(
             any(day["hora_inicio"] and day["hora_fin"] for day in ente["days"])
             for ente in per_ente
@@ -842,6 +855,8 @@ def reporte_por_ente():
                     }))
                     or "Sin puesto"
                 )
+                monto_total = sum(_monto_num(reg.get("monto")) for reg in (r.get("registros") or []))
+                monto_pdp = round(monto_total / 365.0, 2) if monto_total else 0.0
 
                 agrupado[display].append({
                     "rfc": r.get("rfc"),
@@ -855,6 +870,9 @@ def reporte_por_ente():
                     "pre_valoracion": pre.get("comentario", ""),
                     "pre_catalogo": pre.get("catalogo", ""),
                     "pre_otro_texto": pre.get("otro_texto", ""),
+                    "entes_completos": [_ente_display(e) for e in info_ambito["entes_ambito"]],
+                    "monto_total": monto_total,
+                    "monto_pdp": monto_pdp,
                 })
 
     for display, info in entes_info.items():
@@ -1028,6 +1046,28 @@ def guardar_horarios_rfc(rfc):
     )
     log.info("Horarios actualizados rfc=%s ente=%s filas=%s", rfc, ente, filas)
     return redirect(url_for("resultados_por_rfc", rfc=rfc, _anchor="etapa2"))
+
+
+@app.route("/resultados/<rfc>/observaciones-beta", methods=["POST"])
+def guardar_observacion_beta_rfc(rfc):
+    if not session.get("autenticado"):
+        return redirect(url_for("login"))
+
+    ente = request.form.get("ente", "")
+    if not _can_edit_ente(ente):
+        return redirect(url_for("resultados_por_rfc", rfc=rfc))
+
+    observacion = request.form.get("observacion_beta", "")
+    estatus = request.form.get("estatus_beta", "Borrador")
+    filas = db_manager.guardar_observacion_beta(
+        rfc,
+        ente,
+        observacion,
+        estatus=estatus,
+        usuario=session.get("usuario", ""),
+    )
+    log.info("Observacion beta actualizada rfc=%s ente=%s filas=%s", rfc, ente, filas)
+    return redirect(url_for("resultados_por_rfc", rfc=rfc, _anchor="beta-observaciones"))
 
 
 @app.route("/solventacion/<rfc>", methods=["GET", "POST"])

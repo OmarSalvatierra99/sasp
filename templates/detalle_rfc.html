@@ -23,6 +23,17 @@
       <p class="subtitle">Revisión operativa del cruce detectado por RFC y ente.</p>
     </div>
 
+    <div class="multi-ente-board">
+      {% for ente in horarios_stage.per_ente %}
+        <article class="multi-ente-card">
+          <span class="metric-label">{{ ente.ente_display }}</span>
+          <strong>{{ ente.puesto }}</strong>
+          <small>MXN {{ "{:,.2f}".format(ente.annual_amount or 0) }} anual</small>
+          <small>MXN {{ "{:,.2f}".format(ente.pdp_amount or 0) }} PDP</small>
+        </article>
+      {% endfor %}
+    </div>
+
     <table class="tabla-detalle">
       <thead>
         <tr>
@@ -113,6 +124,11 @@
         <small>Equivalente anual / 52 semanas</small>
       </article>
       <article class="metric-card">
+        <span class="metric-label">Monto PDP</span>
+        <strong>MXN {{ "{:,.2f}".format(horarios_stage.total_pdp or 0) }}</strong>
+        <small>Promedio diario estimado (anual / 365)</small>
+      </article>
+      <article class="metric-card">
         <span class="metric-label">Cruces de horario</span>
         <strong>{{ horarios_stage.conflicts|length }}</strong>
         <small>{% if horarios_stage.conflicts %}Requieren revisión{% else %}Sin traslapes detectados{% endif %}</small>
@@ -142,6 +158,7 @@
             <div class="schedule-metrics">
               <span>MXN {{ "{:,.2f}".format(ente.annual_amount or 0) }} anual</span>
               <strong>MXN {{ "{:,.2f}".format(ente.weekly_amount or 0) }} semanal</strong>
+              <small>MXN {{ "{:,.2f}".format(ente.pdp_amount or 0) }} PDP</small>
               <small>{{ ente.weekly_hours_label }} capturadas</small>
             </div>
           </header>
@@ -171,6 +188,56 @@
             <div class="schedule-actions">
               {% if ente.can_edit %}
                 <button type="submit" class="btn btn-primary">Guardar horario</button>
+              {% else %}
+                <span class="bloqueado">Sin permisos para este ente</span>
+              {% endif %}
+            </div>
+          </form>
+        </article>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section id="beta-observaciones" class="stage-section">
+    <div class="section-heading">
+      <div>
+        <span class="stage-badge stage-badge-secondary">Beta</span>
+        <h3>Observaciones beta por ente</h3>
+      </div>
+      <p class="subtitle">Espacio preliminar para notas de trabajo antes de formalizar la observación definitiva.</p>
+    </div>
+
+    <div class="schedule-grid">
+      {% for ente in horarios_stage.per_ente %}
+        <article class="schedule-card">
+          <header class="schedule-card-header">
+            <div>
+              <h4>{{ ente.ente_display }}</h4>
+              <p>Observación temporal de revisión</p>
+            </div>
+            <div class="schedule-metrics">
+              <strong>{{ ente.beta_estatus }}</strong>
+              <small>Editable por el ente correspondiente</small>
+            </div>
+          </header>
+
+          <form method="POST" action="{{ url_for('guardar_observacion_beta_rfc', rfc=rfc) }}" class="beta-observacion-form">
+            <input type="hidden" name="ente" value="{{ ente.ente_clave }}">
+            <div class="field">
+              <label for="estatus_beta_{{ loop.index }}">Estatus beta</label>
+              <select id="estatus_beta_{{ loop.index }}" name="estatus_beta">
+                <option value="Borrador" {% if ente.beta_estatus == 'Borrador' %}selected{% endif %}>Borrador</option>
+                <option value="En revision" {% if ente.beta_estatus == 'En revision' %}selected{% endif %}>En revisión</option>
+                <option value="Listo para dictamen" {% if ente.beta_estatus == 'Listo para dictamen' %}selected{% endif %}>Listo para dictamen</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="observacion_beta_{{ loop.index }}">Observación beta</label>
+              <textarea id="observacion_beta_{{ loop.index }}" name="observacion_beta" rows="5" placeholder="Notas preliminares, hallazgos o siguientes pasos...">{{ ente.beta_observacion }}</textarea>
+            </div>
+            <div class="schedule-actions">
+              {% if ente.can_edit %}
+                <button type="submit" class="btn btn-primary">Guardar observación beta</button>
               {% else %}
                 <span class="bloqueado">Sin permisos para este ente</span>
               {% endif %}
