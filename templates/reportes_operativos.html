@@ -1,0 +1,216 @@
+{% extends "base.html" %}
+{% block title %}Reportes Operativos - SASP{% endblock %}
+{% block content %}
+<section class="module-shell">
+  <header class="module-header">
+    <div>
+      <p class="module-kicker">Auditoría y control</p>
+      <h2>Reportes operativos</h2>
+      <p>Concentra cruces de horario, observaciones, comportamiento por ente y pagos PDP en un solo tablero de control.</p>
+    </div>
+    <div class="module-meta-grid">
+      <article><span>Cruces</span><strong>{{ cruces.resumen.conflictos }}</strong></article>
+      <article><span>Observaciones</span><strong>{{ observaciones.resumen.total }}</strong></article>
+      <article><span>Pagos PDP</span><strong>{{ pdp.resumen.total }}</strong></article>
+      <article><span>Generado</span><strong>{{ generado_en }}</strong></article>
+    </div>
+  </header>
+
+  <section class="workspace-grid workspace-grid-tight">
+    <article class="workspace-card">
+      <div class="section-heading">
+        <div>
+          <h3>Filtros de reporte</h3>
+          <p>Reutiliza un mismo filtro para revisar cruces, observaciones y pagos.</p>
+        </div>
+      </div>
+      <form method="get" class="dense-form">
+        <div class="form-grid form-grid-compact">
+          <label><span>RFC</span><input type="text" name="rfc" value="{{ filtros.rfc or '' }}"></label>
+          <label>
+            <span>Ente</span>
+            <select name="ente">
+              <option value="">Todos</option>
+              {% for item in catalogo_visible %}
+              <option value="{{ item.clave }}" {% if filtros.ente == item.clave %}selected{% endif %}>{{ item.siglas or item.nombre }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Severidad</span>
+            <select name="severidad">
+              <option value="">Todas</option>
+              {% for severity in ['alta', 'media', 'baja'] %}
+              <option value="{{ severity }}" {% if filtros.severidad == severity %}selected{% endif %}>{{ severity|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Estatus observación</span>
+            <select name="estatus">
+              <option value="">Todos</option>
+              {% for status in ['pendiente', 'revisada', 'solventada', 'descartada'] %}
+              <option value="{{ status }}" {% if filtros.estatus == status %}selected{% endif %}>{{ status|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Periodo quincenal</span>
+            <select name="periodo_quincenal">
+              <option value="">Todos</option>
+              {% for periodo in periodos_quincenales %}
+              <option value="{{ periodo.etiqueta }}" {% if filtros.periodo_quincenal == periodo.etiqueta %}selected{% endif %}>{{ periodo.etiqueta }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Estatus PDP</span>
+            <select name="estatus_pago">
+              <option value="">Todos</option>
+              {% for status in ['calculado', 'observado'] %}
+              <option value="{{ status }}" {% if filtros.estatus_pago == status %}selected{% endif %}>{{ status|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <div class="action-row">
+          <button type="submit" class="btn btn-primary">Actualizar tablero</button>
+          <a href="{{ url_for('reportes_operativos') }}" class="btn btn-secondary">Restablecer</a>
+        </div>
+      </form>
+    </article>
+
+    <aside class="workspace-card compact-card">
+      <div class="section-heading">
+        <div>
+          <h3>Exportación</h3>
+          <p>Genera salidas por vista de control.</p>
+        </div>
+      </div>
+      <div class="button-stack">
+        <a href="{{ url_for('exportar_reportes_operativos', tipo='cruces', rfc=filtros.rfc, ente=filtros.ente, severidad=filtros.severidad, estatus=filtros.estatus, periodo_quincenal=filtros.periodo_quincenal) }}" class="btn btn-secondary">Cruces de horario</a>
+        <a href="{{ url_for('exportar_reportes_operativos', tipo='ente', rfc=filtros.rfc, ente=filtros.ente, severidad=filtros.severidad, estatus=filtros.estatus) }}" class="btn btn-secondary">Reporte por ente</a>
+        <a href="{{ url_for('exportar_reportes_operativos', tipo='persona', rfc=filtros.rfc, ente=filtros.ente, severidad=filtros.severidad, estatus=filtros.estatus) }}" class="btn btn-secondary">Reporte por persona</a>
+        <a href="{{ url_for('exportar_reportes_operativos', tipo='severidad', rfc=filtros.rfc, ente=filtros.ente, severidad=filtros.severidad, estatus=filtros.estatus) }}" class="btn btn-secondary">Reporte por severidad</a>
+        <a href="{{ url_for('exportar_reportes_operativos', tipo='periodo', periodo_quincenal=filtros.periodo_quincenal, ente=filtros.ente, rfc=filtros.rfc) }}" class="btn btn-secondary">Reporte quincenal</a>
+        <a href="{{ url_for('exportar_reportes_operativos', tipo='observaciones', rfc=filtros.rfc, ente=filtros.ente, severidad=filtros.severidad, estatus=filtros.estatus) }}" class="btn btn-secondary">Observaciones</a>
+        <a href="{{ url_for('exportar_reportes_operativos', tipo='pdp', periodo_quincenal=filtros.periodo_quincenal, ente=filtros.ente, rfc=filtros.rfc, estatus_pago=filtros.estatus_pago) }}" class="btn btn-secondary">Pagos PDP</a>
+      </div>
+      <p class="metric-caption">Responsable: {{ responsable }}</p>
+    </aside>
+  </section>
+
+  <section class="workspace-grid workspace-grid-wide">
+    <article class="workspace-card">
+      <div class="section-heading">
+        <div>
+          <h3>Personas con cruces</h3>
+          <p>Resumen ejecutivo por persona para auditoría y control.</p>
+        </div>
+      </div>
+      {% if cruces.personas %}
+      <div class="table-wrap">
+        <table class="tabla-resultados table-soft">
+          <thead>
+            <tr>
+              <th>Persona</th>
+              <th>Entes</th>
+              <th>Conflictos</th>
+              <th>Severidad</th>
+              <th>Revisión</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for item in cruces.personas %}
+            <tr>
+              <td><strong>{{ item.nombre }}</strong><br><small>{{ item.rfc }}</small></td>
+              <td>{{ item.entes|join(', ') }}</td>
+              <td>{{ item.numero_conflictos }}</td>
+              <td>{{ item.severidad_maxima|capitalize }}</td>
+              <td>{{ item.estatus_revision|capitalize }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="empty-inline">Sin cruces visibles para el filtro seleccionado.</div>
+      {% endif %}
+    </article>
+
+    <article class="workspace-card">
+      <div class="section-heading">
+        <div>
+          <h3>Resumen por ente</h3>
+          <p>Entes con mayor concentración de conflictos detectados.</p>
+        </div>
+      </div>
+      {% if por_ente %}
+      <ul class="compact-list compact-list-bordered">
+        {% for item in por_ente[:10] %}
+        <li>
+          <div class="list-row-top">
+            <strong>{{ item.ente_display }}</strong>
+            <span class="state-pill state-{{ item.severidad }}">{{ item.severidad|capitalize }}</span>
+          </div>
+          <p>{{ item.personas }} personas · {{ item.conflictos }} conflictos</p>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty-inline">Sin movimientos por ente para este corte.</div>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="workspace-grid workspace-grid-wide">
+    <article class="workspace-card">
+      <div class="section-heading">
+        <div>
+          <h3>Observaciones generadas</h3>
+          <p>Estado de atención de observaciones de cruces.</p>
+        </div>
+      </div>
+      {% if observaciones.observaciones %}
+      <ul class="compact-list compact-list-bordered">
+        {% for item in observaciones.observaciones[:8] %}
+        <li>
+          <div class="list-row-top">
+            <strong>{{ item.nombre }}</strong>
+            <span>{{ item.estatus|capitalize }}</span>
+          </div>
+          <p>{{ item.texto_observacion }}</p>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty-inline">No hay observaciones registradas.</div>
+      {% endif %}
+    </article>
+
+    <article class="workspace-card">
+      <div class="section-heading">
+        <div>
+          <h3>Pagos PDP</h3>
+          <p>Resumen quincenal de cálculos y alertas.</p>
+        </div>
+      </div>
+      {% if pdp.pagos %}
+      <ul class="compact-list compact-list-bordered">
+        {% for item in pdp.pagos[:8] %}
+        <li>
+          <div class="list-row-top">
+            <strong>{{ item.nombre }}</strong>
+            <span class="state-pill state-{{ item.estatus }}">{{ item.estatus|capitalize }}</span>
+          </div>
+          <p>{{ _ente_display(item.ente) }} · {{ item.periodo_quincenal }} · ${{ '%.2f'|format(item.total_calculado or 0) }}</p>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty-inline">No hay pagos PDP para el periodo filtrado.</div>
+      {% endif %}
+    </article>
+  </section>
+</section>
+{% endblock %}

@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{% block title %}Observaciones - SASP{% endblock %}
+{% block content %}
+<section class="module-shell">
+  <header class="module-header">
+    <div>
+      <p class="module-kicker">Seguimiento institucional</p>
+      <h2>Observaciones</h2>
+      <p>Monitorea hallazgos derivados de cruces de horario y controla su atención documental.</p>
+    </div>
+    <div class="module-meta-grid">
+      <article><span>Total</span><strong>{{ resumen.total }}</strong></article>
+      <article><span>Pendientes</span><strong>{{ resumen.estatus.pendiente }}</strong></article>
+      <article><span>Revisadas</span><strong>{{ resumen.estatus.revisada }}</strong></article>
+      <article><span>Solventadas</span><strong>{{ resumen.estatus.solventada }}</strong></article>
+    </div>
+  </header>
+
+  <section class="workspace-grid workspace-grid-tight">
+    <article class="workspace-card">
+      <div class="section-heading">
+        <div>
+          <h3>Filtros</h3>
+          <p>Busca observaciones por persona, ente, severidad o estatus.</p>
+        </div>
+      </div>
+      <form method="get" class="dense-form">
+        <div class="form-grid form-grid-compact">
+          <label><span>RFC</span><input type="text" name="rfc" value="{{ filtros.rfc or '' }}"></label>
+          <label>
+            <span>Ente</span>
+            <select name="ente">
+              <option value="">Todos</option>
+              {% for item in catalogo_visible %}
+              <option value="{{ item.clave }}" {% if filtros.ente == item.clave %}selected{% endif %}>{{ item.siglas or item.nombre }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Severidad</span>
+            <select name="severidad">
+              <option value="">Todas</option>
+              {% for severity in ['alta', 'media', 'baja'] %}
+              <option value="{{ severity }}" {% if filtros.severidad == severity %}selected{% endif %}>{{ severity|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Estatus</span>
+            <select name="estatus">
+              <option value="">Todos</option>
+              {% for status in ['pendiente', 'revisada', 'solventada', 'descartada'] %}
+              <option value="{{ status }}" {% if filtros.estatus == status %}selected{% endif %}>{{ status|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <div class="action-row">
+          <button type="submit" class="btn btn-primary">Aplicar filtros</button>
+          <a href="{{ url_for('observaciones_home') }}" class="btn btn-secondary">Restablecer</a>
+          <a href="{{ url_for('exportar_reportes_operativos', tipo='observaciones', rfc=filtros.rfc, ente=filtros.ente, severidad=filtros.severidad, estatus=filtros.estatus) }}" class="btn btn-secondary">Exportar reporte</a>
+        </div>
+      </form>
+    </article>
+
+    <aside class="workspace-card compact-card">
+      <div class="section-heading">
+        <div>
+          <h3>Severidad</h3>
+          <p>Distribución resumida de hallazgos.</p>
+        </div>
+      </div>
+      <ul class="compact-list">
+        <li>Alta: {{ resumen.severidad.alta }}</li>
+        <li>Media: {{ resumen.severidad.media }}</li>
+        <li>Baja: {{ resumen.severidad.baja }}</li>
+      </ul>
+    </aside>
+  </section>
+
+  <article class="workspace-card">
+    <div class="section-heading">
+      <div>
+        <h3>Listado de observaciones</h3>
+        <p>Registro compacto para revisión, solventación o descarte.</p>
+      </div>
+    </div>
+    {% if observaciones %}
+    <div class="observation-stack">
+      {% for item in observaciones %}
+      <article class="observation-card">
+        <div class="observation-card-top">
+          <div>
+            <h4>{{ item.nombre }}</h4>
+            <p>{{ item.rfc }} · {{ _ente_display(item.ente_a) }} / {{ _ente_display(item.ente_b) }}</p>
+          </div>
+          <div class="observation-badges">
+            <span class="state-pill state-{{ item.severidad }}">{{ item.severidad|capitalize }}</span>
+            <span class="state-pill state-{{ item.estatus }}">{{ item.estatus|capitalize }}</span>
+          </div>
+        </div>
+        <p>{{ item.texto_observacion }}</p>
+        <small>{{ item.recomendacion }}</small>
+        <form method="post" action="{{ url_for('actualizar_observacion_cruce') }}" class="inline-review-form inline-review-form-wide">
+          <input type="hidden" name="conflicto_hash" value="{{ item.conflicto_hash }}">
+          <select name="estatus">
+            {% for status in ['pendiente', 'revisada', 'solventada', 'descartada'] %}
+            <option value="{{ status }}" {% if item.estatus == status %}selected{% endif %}>{{ status|capitalize }}</option>
+            {% endfor %}
+          </select>
+          <input type="text" name="comentarios_adicionales" value="{{ item.comentarios_adicionales or '' }}" placeholder="Referencia, evidencia o comentario">
+          <button type="submit" class="btn btn-secondary btn-sm">Guardar</button>
+        </form>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-inline">No hay observaciones registradas con los filtros actuales.</div>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}

@@ -24,11 +24,10 @@
       </div>
 
       <div class="nav-links">
-        <span class="nav-user-chip">{{ session.get('nombre', session.get('usuario', 'Usuario')) }}</span>
-        <a href="{{ url_for('dashboard') }}" class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}">Inicio</a>
-        <a href="{{ url_for('reporte_por_ente') }}" class="nav-link {% if request.endpoint == 'reporte_por_ente' %}active{% endif %}">Resultados</a>
+        <a href="{{ url_for('dashboard') }}" class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}">Carga de Datos</a>
+        <a href="{{ url_for('reporte_por_ente') }}" class="nav-link {% if request.endpoint in ['reporte_por_ente', 'resultados_por_rfc', 'horarios_home', 'horarios_por_persona', 'horarios_por_ente', 'cruce_entes', 'observaciones_home', 'pagos_pdp_home', 'calcular_pagos_pdp_route', 'reportes_operativos', 'exportar_reportes_operativos'] %}active{% endif %}">Resultados</a>
         <a href="{{ url_for('catalogos_home') }}" class="nav-link {% if request.endpoint == 'catalogos_home' %}active{% endif %}">Catálogos</a>
-        <a href="{{ url_for('logout') }}" class="nav-link">Salir</a>
+        <a href="{{ url_for('logout') }}" class="nav-link nav-link-logout">Salir</a>
       </div>
     </div>
   </nav>

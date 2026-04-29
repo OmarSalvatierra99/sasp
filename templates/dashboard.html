@@ -1,62 +1,157 @@
 {% extends "base.html" %}
-{% block title %}SASP - Panel de Control{% endblock %}
+{% block title %}SASP - Carga de Datos{% endblock %}
 
 {% block content %}
-<div class="dashboard">
-  <header class="page-header">
-    <h2>{{ nombre }}</h2>
-    <p class="subtitle">
-      Cargue los archivos de nómina por quincena para actualizar la base operativa.
-      El sistema normaliza entes, sincroniza usuarios compartidos y detecta cruces entre entes de forma automática.
-    </p>
-  </header>
+<div class="upload-minimal-shell">
+  <script id="dashboardProcessedDrawerData" type="application/json">{{ dashboard_processed_drawer | tojson }}</script>
 
-  <section class="dashboard-summary">
-    <article class="metric-card">
-      <span class="metric-label">Usuario activo</span>
-      <strong>{{ nombre }}</strong>
-      <small>{{ usuario }}</small>
-    </article>
-    <article class="metric-card">
-      <span class="metric-label">Etapa 1</span>
-      <strong>Cruce quincenal</strong>
-      <small>Duplicidad entre entes por RFC</small>
-    </article>
-    <article class="metric-card">
-      <span class="metric-label">Etapa 2</span>
-      <strong>Cruce de horarios</strong>
-      <small>Revisión semanal por ente en el detalle RFC</small>
-    </article>
-  </section>
+  <section class="upload-minimal-stage">
+    <header class="upload-minimal-header">
+      <span class="upload-minimal-kicker">Carga de datos</span>
+      <h2>Quincenas y horarios</h2>
+    </header>
 
-  <div class="template-download">
-    <a href="{{ url_for('descargar_plantilla') }}" class="btn btn-success">
-      Descargar plantilla Excel
-    </a>
-  </div>
-
-  <section class="upload-section">
-    <form id="uploadForm" method="POST" enctype="multipart/form-data" action="{{ url_for('upload_laboral') }}">
-      <div class="upload-area" id="uploadArea" tabindex="0" aria-label="Área para subir archivos Excel">
-        <div class="upload-icon">XLSX</div>
-        <div class="upload-text">
-          <h3>Arrastre o seleccione los archivos Excel</h3>
-          <p class="hint">Formatos permitidos: <strong>.xlsx / .xls</strong> por ente.</p>
+    <div class="upload-minimal-grid">
+      <article class="upload-card">
+        <div class="upload-card-head">
+          <div>
+            <h3>Quincenas</h3>
+          </div>
+          <a href="{{ url_for('descargar_plantilla') }}" class="btn btn-secondary">Descargar plantilla</a>
         </div>
-        <input type="file" id="fileInput" name="files" multiple accept=".xlsx,.xls" hidden>
-      </div>
-    </form>
 
-    <div id="uploadStatus" class="upload-status" hidden>
-      <div class="spinner"></div>
-      <p>Analizando archivos, espere por favor...</p>
-    </div>
+        <form id="uploadForm" method="POST" enctype="multipart/form-data" action="{{ url_for('upload_laboral') }}">
+          <div
+            class="upload-dropzone"
+            id="uploadArea"
+            tabindex="0"
+            role="button"
+            aria-label="Subir plantilla de quincenas"
+            aria-describedby="uploadDropHint"
+            aria-controls="fileInput"
+          >
+            <div class="upload-dropzone-icon" aria-hidden="true">+</div>
+            <div class="upload-dropzone-copy">
+              <strong>Arrastra o selecciona un archivo</strong>
+              <span id="uploadDropHint">.xlsx, .xls</span>
+            </div>
+          </div>
+          <input type="file" id="fileInput" name="files" multiple accept=".xlsx,.xls" hidden>
+        </form>
 
-    <div id="uploadResult" class="upload-result" hidden>
-      <h4>Resultado del análisis</h4>
-      <p id="resultMessage"></p>
-      <a href="{{ url_for('reporte_por_ente') }}" class="btn btn-primary">Ver Reporte General</a>
+        <div id="selectedFilesEmpty" class="upload-inline-state">
+          <strong>Sin archivo cargado</strong>
+        </div>
+        <ul id="selectedFilesList" class="upload-file-list" hidden></ul>
+
+        <div id="uploadStatus" class="upload-progress-card" hidden aria-live="polite">
+          <div class="upload-progress-top">
+            <div>
+              <strong id="quincenasProgressLabel">Procesando archivo</strong>
+              <p id="quincenasProgressText">Preparando carga.</p>
+            </div>
+            <span id="quincenasProgressPercent">0%</span>
+          </div>
+          <div class="upload-progress-bar">
+            <span id="quincenasProgressBar"></span>
+          </div>
+        </div>
+
+        <div id="uploadResult" class="upload-inline-result" hidden aria-live="polite">
+          <strong id="resultStatusTitle">Archivo cargado</strong>
+          <p id="resultMessage"></p>
+        </div>
+
+        <div class="upload-card-actions">
+          <button type="button" class="btn btn-secondary" id="replaceQuincenasBtn">Reemplazar</button>
+          <button type="button" class="btn btn-primary" id="processUploadBtn" disabled>Procesar archivo</button>
+        </div>
+      </article>
+
+      <article class="upload-card">
+        <div class="upload-card-head">
+          <div>
+            <h3>Horarios</h3>
+          </div>
+          <a href="{{ url_for('descargar_plantilla_horarios') }}" class="btn btn-secondary">Descargar plantilla</a>
+        </div>
+
+        <form id="uploadHorariosForm" method="POST" enctype="multipart/form-data" action="{{ url_for('upload_horarios') }}">
+          <div
+            class="upload-dropzone"
+            id="uploadHorariosArea"
+            tabindex="0"
+            role="button"
+            aria-label="Subir plantilla de horarios"
+            aria-describedby="uploadHorariosDropHint"
+            aria-controls="horariosFileInput"
+          >
+            <div class="upload-dropzone-icon" aria-hidden="true">+</div>
+            <div class="upload-dropzone-copy">
+              <strong>Arrastra o selecciona un archivo</strong>
+              <span id="uploadHorariosDropHint">.xlsx, .xls</span>
+            </div>
+          </div>
+          <input type="file" id="horariosFileInput" name="files" multiple accept=".xlsx,.xls" hidden>
+        </form>
+
+        <div id="horariosFilesEmpty" class="upload-inline-state">
+          <strong>{% if dashboard_horarios_status.total %}Archivo cargado{% else %}Sin archivo cargado{% endif %}</strong>
+          {% if dashboard_horarios_status.total %}
+          <small>{{ dashboard_horarios_status.total }} horario(s) registrados</small>
+          {% endif %}
+        </div>
+        <ul id="horariosFilesList" class="upload-file-list" hidden></ul>
+
+        <div id="uploadHorariosStatus" class="upload-progress-card" hidden aria-live="polite">
+          <div class="upload-progress-top">
+            <div>
+              <strong id="horariosProgressLabel">Procesando archivo</strong>
+              <p id="horariosProgressText">Preparando carga.</p>
+            </div>
+            <span id="horariosProgressPercent">0%</span>
+          </div>
+          <div class="upload-progress-bar">
+            <span id="horariosProgressBar"></span>
+          </div>
+        </div>
+
+        <div id="uploadHorariosResult" class="upload-inline-result" hidden aria-live="polite">
+          <strong id="horariosResultTitle">Archivo cargado</strong>
+          <p id="horariosResultMessage"></p>
+        </div>
+
+        <div class="upload-card-actions">
+          <button type="button" class="btn btn-secondary" id="replaceHorariosBtn">Reemplazar</button>
+          <button type="button" class="btn btn-primary" id="processHorariosUploadBtn" disabled>Procesar archivo</button>
+        </div>
+      </article>
     </div>
   </section>
 </div>
+
+<button class="drawer-toggle dashboard-drawer-toggle" id="processedDrawerToggle" type="button" aria-controls="processedDrawer" aria-expanded="false">
+  <span>Archivos procesados</span>
+  <span class="drawer-toggle-count" id="processedDrawerCount">{{ (dashboard_processed_drawer.trabajadores|length) + (dashboard_processed_drawer.horarios|length) }}</span>
+</button>
+
+<div class="drawer-overlay" id="processedDrawerOverlay"></div>
+
+<aside class="drawer-panel drawer-panel-minimal" id="processedDrawer" aria-hidden="true">
+  <div class="drawer-header">
+    <div>
+      <div class="drawer-title">Archivos procesados</div>
+      <div class="drawer-meta" id="processedDrawerMeta">Consulta de trabajadores y horarios</div>
+    </div>
+    <button class="drawer-close" id="processedDrawerClose" type="button" aria-label="Cerrar panel">✕</button>
+  </div>
+  <div class="drawer-body">
+    <div class="drawer-filter-tabs">
+      <button type="button" class="drawer-filter-tab is-active" data-processed-filter="trabajadores">Trabajadores</button>
+      <button type="button" class="drawer-filter-tab" data-processed-filter="horarios">Horarios</button>
+    </div>
+    <div class="processed-list" id="processedTableBody"></div>
+    <div class="processed-empty" id="processedEmpty">Sin archivos procesados.</div>
+  </div>
+</aside>
 {% endblock %}

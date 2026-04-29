@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Pagos PDP - SASP{% endblock %}
+{% block content %}
+<section class="module-shell">
+  <header class="module-header">
+    <div>
+      <p class="module-kicker">Control quincenal</p>
+      <h2>Pagos PDP</h2>
+      <p>Calcula pagos PDP por periodo quincenal y marca alertas cuando existan conflictos de horario activos.</p>
+    </div>
+    <div class="module-meta-grid">
+      <article><span>Pagos</span><strong>{{ resumen.total }}</strong></article>
+      <article><span>Observados</span><strong>{{ resumen.observados }}</strong></article>
+      <article><span>Calculados</span><strong>{{ resumen.calculados }}</strong></article>
+      <article><span>Total</span><strong>${{ '%.2f'|format(resumen.monto_total) }}</strong></article>
+    </div>
+  </header>
+
+  <section class="workspace-grid workspace-grid-tight">
+    <article class="workspace-card">
+      <div class="section-heading">
+        <div>
+          <h3>Periodo de cálculo</h3>
+          <p>Ejecuta o consulta pagos por periodo quincenal, RFC o ente.</p>
+        </div>
+      </div>
+      <form method="post" action="{{ url_for('calcular_pagos_pdp_route') }}" class="dense-form">
+        <div class="form-grid form-grid-compact">
+          <label>
+            <span>Periodo quincenal</span>
+            <select name="periodo_quincenal" required>
+              {% for periodo in periodos_quincenales %}
+              <option value="{{ periodo.etiqueta }}" {% if periodo_actual and periodo_actual.etiqueta == periodo.etiqueta %}selected{% endif %}>{{ periodo.etiqueta }} · {{ periodo.fecha_inicio }} a {{ periodo.fecha_fin }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Ente</span>
+            <select name="ente">
+              <option value="">Todos</option>
+              {% for item in catalogo_visible %}
+              <option value="{{ item.clave }}" {% if filtros.ente == item.clave %}selected{% endif %}>{{ item.siglas or item.nombre }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label><span>RFC</span><input type="text" name="rfc" value="{{ filtros.rfc or '' }}"></label>
+          <label>
+            <span>Estatus</span>
+            <select name="estatus">
+              <option value="">Todos</option>
+              {% for status in ['calculado', 'observado'] %}
+              <option value="{{ status }}" {% if filtros.estatus == status %}selected{% endif %}>{{ status|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <div class="action-row">
+          <button type="submit" class="btn btn-primary">Calcular pagos PDP</button>
+          <a href="{{ url_for('pagos_pdp_home') }}" class="btn btn-secondary">Limpiar</a>
+          <a href="{{ url_for('exportar_reportes_operativos', tipo='pdp', periodo_quincenal=(periodo_actual.etiqueta if periodo_actual else ''), ente=filtros.ente, rfc=filtros.rfc) }}" class="btn btn-secondary">Exportar reporte</a>
+        </div>
+      </form>
+    </article>
+
+    <aside class="workspace-card compact-card">
+      <div class="section-heading">
+        <div>
+          <h3>Periodo actual</h3>
+          <p>Ventana activa para cálculo y alertas.</p>
+        </div>
+      </div>
+      {% if periodo_actual %}
+      <p class="metric-caption">{{ periodo_actual.etiqueta }}</p>
+      <small>{{ periodo_actual.fecha_inicio }} a {{ periodo_actual.fecha_fin }}</small>
+      <p class="metric-caption">{{ conflictos_periodo|length }} conflictos de horario impactan este periodo.</p>
+      {% else %}
+      <div class="empty-inline">No se encontró periodo quincenal activo.</div>
+      {% endif %}
+    </aside>
+  </section>
+
+  <article class="workspace-card">
+    <div class="section-heading">
+      <div>
+        <h3>Pagos calculados</h3>
+        <p>Resultado por RFC y ente con alerta de observación cuando existe conflicto de horario aplicable.</p>
+      </div>
+      <a href="{{ url_for('reportes_operativos', periodo_quincenal=(periodo_actual.etiqueta if periodo_actual else '')) }}" class="btn btn-secondary">Ver reportes</a>
+    </div>
+    {% if pagos %}
+    <div class="table-wrap">
+      <table class="tabla-resultados table-soft">
+        <thead>
+          <tr>
+            <th>Persona</th>
+            <th>Ente</th>
+            <th>Periodo</th>
+            <th>Sueldo base</th>
+            <th>PDP</th>
+            <th>Total</th>
+            <th>Estatus</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in pagos %}
+          <tr>
+            <td><strong>{{ item.nombre }}</strong><br><small>{{ item.rfc }}</small></td>
+            <td>{{ _ente_display(item.ente) }}</td>
+            <td>{{ item.periodo_quincenal }}</td>
+            <td>${{ '%.2f'|format(item.sueldo_base or 0) }}</td>
+            <td>${{ '%.2f'|format(item.monto_pdp or 0) }}</td>
+            <td>${{ '%.2f'|format(item.total_calculado or 0) }}</td>
+            <td><span class="state-pill state-{{ item.estatus }}">{{ item.estatus|capitalize }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty-inline">No hay pagos PDP calculados para los filtros actuales.</div>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}

@@ -53,6 +53,66 @@
     </article>
   </section>
 
+  <section class="results-monitor-shell">
+    <article class="results-monitor-card">
+      <div class="section-heading">
+        <div>
+          <h3>Monitoreo de cruces</h3>
+          <p>Seguimiento compacto de cruces de horario, observaciones y pagos observados.</p>
+        </div>
+        <div class="results-monitor-actions">
+          <a href="{{ url_for('horarios_home') }}" class="btn btn-secondary btn-sm">Horarios</a>
+          <a href="{{ url_for('cruce_entes') }}" class="btn btn-secondary btn-sm">Cruces de horario</a>
+          <a href="{{ url_for('observaciones_home') }}" class="btn btn-secondary btn-sm">Observaciones</a>
+          <a href="{{ url_for('pagos_pdp_home') }}" class="btn btn-secondary btn-sm">Pagos PDP</a>
+        </div>
+      </div>
+
+      <div class="results-monitor-grid">
+        <article class="monitor-tile">
+          <span>Cruces de horario</span>
+          <strong>{{ resultados_monitor.resumen.cruces_horario or 0 }}</strong>
+        </article>
+        <article class="monitor-tile">
+          <span>Personas con cruce</span>
+          <strong>{{ resultados_monitor.resumen.personas_con_cruce or 0 }}</strong>
+        </article>
+        <article class="monitor-tile">
+          <span>Observaciones</span>
+          <strong>{{ resultados_monitor.resumen.observaciones or 0 }}</strong>
+        </article>
+        <article class="monitor-tile">
+          <span>Pagos observados</span>
+          <strong>{{ resultados_monitor.resumen.pagos_observados or 0 }}</strong>
+        </article>
+      </div>
+    </article>
+
+    <article class="results-monitor-card">
+      <div class="section-heading">
+        <div>
+          <h3>Casos prioritarios</h3>
+          <p>Personas con mayor número de conflictos de horario detectados.</p>
+        </div>
+      </div>
+      {% if resultados_monitor.personas %}
+      <ul class="compact-list compact-list-bordered">
+        {% for item in resultados_monitor.personas %}
+        <li>
+          <div class="list-row-top">
+            <strong>{{ item.nombre }}</strong>
+            <span class="state-pill state-{{ item.severidad_maxima }}">{{ item.severidad_maxima|capitalize }}</span>
+          </div>
+          <p>{{ item.rfc }} · {{ item.entes|join(' · ') }}</p>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <div class="empty-inline">No hay cruces de horario registrados todavía.</div>
+      {% endif %}
+    </article>
+  </section>
+
   {% if validacion_error %}
     <div class="badge badge-danger" style="display: block; padding: var(--space-6); margin-bottom: var(--space-6);">
       {{ validacion_error_msg or 'No fue posible validar los datos.' }}

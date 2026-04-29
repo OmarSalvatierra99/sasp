@@ -12,9 +12,11 @@ from werkzeug.exceptions import RequestEntityTooLarge
 import os
 import sys
 import logging
+import json
 import pandas as pd
 from io import BytesIO
 from itertools import combinations
+from datetime import datetime, date
 from scripts.utils import (
     DataProcessor,
     DatabaseManager,
@@ -130,8 +132,24 @@ def _safe_next_url(raw_url):
     return url
 
 
+def _normalize_login_display(value):
+    return " ".join(str(value or "").strip().lower().split())
+
+
 def _get_login_users():
-    return ordered_users("05-sasp", priority=LOGIN_USER_PRIORITY)
+    users = ordered_users("05-sasp", priority=LOGIN_USER_PRIORITY)
+    deduped_users = []
+    seen_displays = set()
+
+    for user in users:
+        display_key = _normalize_login_display(user.get("display_name") or user.get("username"))
+        if display_key and display_key in seen_displays:
+            continue
+        if display_key:
+            seen_displays.add(display_key)
+        deduped_users.append(user)
+
+    return deduped_users
 
 
 def _normalize_session_entes(entes):
@@ -145,6 +163,1283 @@ def _normalize_session_entes(entes):
         clave_norm = db_manager.normalizar_ente_clave(ente_txt)
         entes_norm.append(clave_norm or ente_txt)
     return entes_norm
+
+
+def _build_dashboard_context():
+    conn = db_manager._connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            COUNT(*) AS total_registros,
+            COUNT(DISTINCT rfc) AS total_rfcs,
+            COUNT(DISTINCT ente) AS entes_detectados,
+            MAX(fecha_actualizacion) AS ultima_actualizacion
+        FROM registros_laborales
+    """)
+    row = cur.fetchone() or {}
+    conn.close()
+
+    catalog_rows = db_manager._get_catalog_snapshot()["rows"]
+    dashboard_entes = []
+    seen_catalog_keys = set()
+    for row_meta in catalog_rows:
+        clave = str(row_meta.get("clave") or "").strip()
+        if not clave or clave in seen_catalog_keys:
+            continue
+        seen_catalog_keys.add(clave)
+        dashboard_entes.append({
+            "clave": clave,
+            "nombre": str(row_meta.get("nombre") or "").strip(),
+            "siglas": str(row_meta.get("siglas") or "").strip(),
+            "tipo": str(row_meta.get("tipo_tabla") or "").strip(),
+        })
+
+    total_registros = int(row["total_registros"] or 0)
+    entes_detectados = int(row["entes_detectados"] or 0)
+    resultados_validados = db_manager.resultados_validados()
+    ultima_actualizacion = row["ultima_actualizacion"] or ""
+
+    if total_registros:
+        carga_estado = "completada"
+        carga_texto = "Base operativa con registros cargados."
+        cruce_estado = "lista"
+        cruce_texto = "Cruces por RFC disponibles para revisión."
+        observaciones_estado = "lista"
+        observaciones_texto = "Monitoreo listo para advertencias y hallazgos de carga."
+        guardado_estado = "completada" if resultados_validados else "lista"
+        guardado_texto = (
+            "Resultados marcados como validados."
+            if resultados_validados
+            else "Datos operativos guardados y listos para cierre."
+        )
+    else:
+        carga_estado = "pendiente"
+        carga_texto = "Seleccione archivos para iniciar la actualización."
+        cruce_estado = "pendiente"
+        cruce_texto = "Se habilita cuando existan registros operativos."
+        observaciones_estado = "pendiente"
+        observaciones_texto = "Aparecen cuando el sistema detecta incidencias o advertencias."
+        guardado_estado = "pendiente"
+        guardado_texto = "Se activa después de procesar una carga válida."
+
+    dashboard_crosses = _build_dashboard_cross_summary()
+    processed_files = _build_dashboard_processed_files()
+    processed_drawer = _build_dashboard_processed_drawer()
+    horarios_preview = _build_dashboard_horarios_preview()
+
+    return {
+        "dashboard_summary": {
+            "total_registros": total_registros,
+            "total_rfcs": int(row["total_rfcs"] or 0),
+            "entes_detectados": entes_detectados,
+            "ultima_actualizacion": ultima_actualizacion,
+            "resultados_validados": resultados_validados,
+        },
+        "dashboard_monitor": {
+            "observaciones_total": 0,
+            "observaciones_error": 0,
+            "observaciones_warning": 0,
+            "observaciones_info": 0,
+            "observaciones_estado": "Sin observaciones",
+            "guardados_total": total_registros,
+            "procesados_total": total_registros,
+            "pendientes_total": 0,
+            "errores_total": 0,
+            "guardado_estado": (
+                "Validado" if resultados_validados else ("Base cargada" if total_registros else "Sin actividad")
+            ),
+            "ultima_actualizacion": ultima_actualizacion,
+        },
+        "dashboard_steps": [
+            {
+                "id": "carga",
+                "title": "Carga",
+                "status": carga_estado,
+                "description": carga_texto,
+            },
+            {
+                "id": "cruce",
+                "title": "Cruce y validación",
+                "status": cruce_estado,
+                "description": cruce_texto,
+            },
+            {
+                "id": "observaciones",
+                "title": "Observaciones",
+                "status": observaciones_estado,
+                "description": observaciones_texto,
+            },
+            {
+                "id": "guardado",
+                "title": "Guardado y cierre",
+                "status": guardado_estado,
+                "description": guardado_texto,
+            },
+        ],
+        "dashboard_entes": sorted(
+            dashboard_entes,
+            key=lambda item: (
+                item["tipo"] != "ENTE",
+                (item["siglas"] or item["nombre"] or item["clave"]).lower(),
+            ),
+        ),
+        "dashboard_crosses": dashboard_crosses,
+        "dashboard_processed_files": processed_files,
+        "dashboard_processed_drawer": processed_drawer,
+        "dashboard_horarios_preview": horarios_preview,
+        "dashboard_horarios_status": _build_dashboard_horarios_status(),
+    }
+
+
+def _build_dashboard_cross_summary():
+    catalogo = db_manager.listar_entes() + db_manager.listar_municipios()
+    catalogo_index = _indexar_catalogo(catalogo)
+    cruces = db_manager.obtener_cruces_reales()
+
+    summary = {
+        "total": len(cruces),
+        "ente_ente": {"label": "Ente - ente", "count": 0, "examples": []},
+        "ente_municipio": {"label": "Ente - municipio", "count": 0, "examples": []},
+        "municipio_municipio": {"label": "Municipio - municipio", "count": 0, "examples": []},
+    }
+
+    def _cross_bucket(entes):
+        tipos = []
+        for ente_ref in entes or []:
+            meta = catalogo_index.get(_sanitize_text(ente_ref)) or {}
+            tipo = str(meta.get("ambito") or _tipo_ente(ente_ref)).upper()
+            tipos.append("MUNICIPIO" if "MUNIC" in tipo else "ENTE")
+        if tipos and all(tipo == "MUNICIPIO" for tipo in tipos):
+            return "municipio_municipio"
+        if "MUNICIPIO" in tipos and "ENTE" in tipos:
+            return "ente_municipio"
+        return "ente_ente"
+
+    for cruce in cruces:
+        bucket = _cross_bucket(cruce.get("entes") or [])
+        summary[bucket]["count"] += 1
+        if len(summary[bucket]["examples"]) >= 4:
+            continue
+        entes_display = [_ente_display(ente_ref) for ente_ref in (cruce.get("entes") or [])]
+        summary[bucket]["examples"].append({
+            "rfc": str(cruce.get("rfc", "")).strip(),
+            "nombre": str(cruce.get("nombre", "")).strip(),
+            "entes": entes_display,
+            "qnas": list(cruce.get("qnas_cruce") or []),
+            "descripcion": str(cruce.get("descripcion", "")).strip(),
+        })
+
+    return summary
+
+
+def _build_dashboard_processed_files():
+    conn = db_manager._connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            ente,
+            COUNT(*) AS total_registros,
+            COUNT(DISTINCT rfc) AS total_rfcs,
+            MAX(fecha_actualizacion) AS ultima_actualizacion
+        FROM registros_laborales
+        GROUP BY ente
+        ORDER BY MAX(fecha_actualizacion) DESC, ente
+        LIMIT 8
+    """)
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return [
+        {
+            "ente": row["ente"],
+            "ente_display": _ente_display(row["ente"]),
+            "total_registros": int(row["total_registros"] or 0),
+            "total_rfcs": int(row["total_rfcs"] or 0),
+            "ultima_actualizacion": row["ultima_actualizacion"] or "",
+        }
+        for row in rows
+    ]
+
+
+def _build_dashboard_processed_drawer():
+    conn = db_manager._connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT
+            ente,
+            COUNT(*) AS total_registros,
+            COUNT(DISTINCT rfc) AS total_rfcs,
+            MAX(fecha_actualizacion) AS ultima_actualizacion
+        FROM registros_laborales
+        GROUP BY ente
+        ORDER BY MAX(fecha_actualizacion) DESC, ente
+        LIMIT 12
+    """)
+    trabajadores = [{
+        "label": f"Carga {_ente_display(row['ente'])}",
+        "secondary": f"{int(row['total_registros'] or 0)} registros · {int(row['total_rfcs'] or 0)} RFC",
+        "fecha": row["ultima_actualizacion"] or "",
+        "tipo": "Trabajadores",
+        "href": url_for("reporte_por_ente", ente=_ente_display(row["ente"])),
+        "cta": "Ver",
+    } for row in cur.fetchall()]
+
+    cur.execute("""
+        SELECT
+            id,
+            rfc,
+            nombre,
+            ente,
+            hora_inicio,
+            hora_fin,
+            actualizado,
+            creado
+        FROM horarios_persona
+        ORDER BY COALESCE(actualizado, creado) DESC, id DESC
+        LIMIT 12
+    """)
+    horarios = [{
+        "label": str(row["nombre"] or row["rfc"] or "Horario").strip(),
+        "secondary": f"{_ente_display(row['ente'])} · {str(row['hora_inicio'] or '').strip()} - {str(row['hora_fin'] or '').strip()}",
+        "fecha": row["actualizado"] or row["creado"] or "",
+        "tipo": "Horarios",
+        "href": url_for("horarios_home", rfc=row["rfc"]),
+        "cta": "Abrir",
+    } for row in cur.fetchall()]
+    conn.close()
+
+    return {
+        "trabajadores": trabajadores,
+        "horarios": horarios,
+    }
+
+
+def _build_dashboard_horarios_preview():
+    horarios = _filtrar_horarios_visibles(db_manager.listar_horarios_persona())
+    preview = []
+    for horario in horarios[:8]:
+        dia_semana = int(horario.get("dia_semana", 0))
+        preview.append({
+            "id": horario.get("id"),
+            "rfc": horario.get("rfc"),
+            "nombre": horario.get("nombre"),
+            "ente": horario.get("ente"),
+            "ente_display": _ente_display(horario.get("ente")),
+            "dia_label": WEEK_DAYS[dia_semana][1] if 0 <= dia_semana < len(WEEK_DAYS) else "",
+            "horario": f"{horario.get('hora_inicio', '')} - {horario.get('hora_fin', '')}",
+            "estatus": horario.get("estatus") or "activo",
+        })
+    return preview
+
+
+def _build_dashboard_horarios_status():
+    horarios = _filtrar_horarios_visibles(db_manager.listar_horarios_persona())
+    if not horarios:
+        return {"total": 0, "ultima_actualizacion": "", "estado": "Sin archivo cargado"}
+    ultima_actualizacion = max(str(item.get("actualizado") or item.get("creado") or "") for item in horarios)
+    return {
+        "total": len(horarios),
+        "ultima_actualizacion": ultima_actualizacion,
+        "estado": "Archivo cargado",
+    }
+
+
+def _normalize_upload_header(value):
+    return (
+        str(value or "")
+        .strip()
+        .lower()
+        .replace("á", "a")
+        .replace("é", "e")
+        .replace("í", "i")
+        .replace("ó", "o")
+        .replace("ú", "u")
+        .replace("ü", "u")
+        .replace("ñ", "n")
+    )
+
+
+def _dia_semana_desde_valor(value):
+    texto = _normalize_upload_header(value).replace(".", "").replace(",", "")
+    if texto == "":
+        return None
+    if texto.isdigit():
+        numero = int(texto)
+        if 0 <= numero <= 6:
+            return numero
+        if 1 <= numero <= 7:
+            return numero - 1
+        return None
+    mapa = {
+        "lunes": 0,
+        "martes": 1,
+        "miercoles": 2,
+        "jueves": 3,
+        "viernes": 4,
+        "sabado": 5,
+        "domingo": 6,
+    }
+    return mapa.get(texto)
+
+
+def _hora_texto_desde_valor(value):
+    if value in (None, ""):
+        return ""
+    if isinstance(value, datetime):
+        return value.strftime("%H:%M")
+    if hasattr(value, "strftime"):
+        try:
+            return value.strftime("%H:%M")
+        except Exception:
+            pass
+    texto = str(value).strip()
+    hora = _parse_time(texto)
+    return hora.strftime("%H:%M") if hora else texto
+
+
+def _fecha_texto_desde_valor(value):
+    if value in (None, ""):
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    texto = str(value).strip()
+    fecha = _parse_date(texto)
+    return fecha.isoformat() if fecha else texto
+
+
+def _extract_horarios_from_files(files):
+    column_aliases = {
+        "rfc": {"rfc"},
+        "nombre": {"nombre", "persona", "trabajador", "profesor", "servidor publico"},
+        "ente": {"ente", "institucion", "dependencia", "municipio"},
+        "cargo": {"cargo", "plaza", "puesto", "asignatura", "descripcion", "descripcion del servicio", "servicio"},
+        "dia_semana": {"dia", "dia_semana", "dia de la semana"},
+        "hora_inicio": {"hora_inicio", "hora de inicio", "inicio", "entrada", "hora entrada"},
+        "hora_fin": {"hora_fin", "hora de fin", "fin", "salida", "hora salida"},
+        "fecha_inicio_vigencia": {"fecha_inicio_vigencia", "fecha inicio", "inicio vigencia", "vigencia inicio"},
+        "fecha_fin_vigencia": {"fecha_fin_vigencia", "fecha fin", "fin vigencia", "vigencia fin"},
+        "periodo": {"periodo", "ciclo", "quincena"},
+        "observaciones": {"observaciones", "observacion", "comentarios", "comentario"},
+        "estatus": {"estatus", "estado"},
+    }
+
+    horarios = []
+    alertas = []
+
+    for file_storage in files:
+        nombre_archivo = getattr(file_storage, "filename", "horarios.xlsx")
+        try:
+            excel = pd.ExcelFile(file_storage)
+        except Exception as exc:
+            alertas.append({"archivo": nombre_archivo, "mensaje": f"No fue posible leer el archivo de horarios: {exc}"})
+            continue
+
+        for sheet_name in excel.sheet_names:
+            try:
+                df = pd.read_excel(excel, sheet_name=sheet_name)
+            except Exception as exc:
+                alertas.append({"archivo": nombre_archivo, "mensaje": f"No fue posible leer la hoja '{sheet_name}': {exc}"})
+                continue
+
+            if df.empty:
+                continue
+
+            normalized_columns = {_normalize_upload_header(column): column for column in df.columns}
+            resolved = {}
+            for target, aliases in column_aliases.items():
+                for alias in aliases:
+                    if alias in normalized_columns:
+                        resolved[target] = normalized_columns[alias]
+                        break
+
+            required = ["rfc", "ente", "dia_semana", "hora_inicio", "hora_fin", "fecha_inicio_vigencia"]
+            missing = [field for field in required if field not in resolved]
+            if missing:
+                alertas.append({
+                    "archivo": nombre_archivo,
+                    "mensaje": f"La hoja '{sheet_name}' no contiene columnas requeridas: {', '.join(missing)}.",
+                })
+                continue
+
+            for _, row in df.iterrows():
+                rfc = str(row.get(resolved["rfc"], "") or "").strip().upper()
+                ente = str(row.get(resolved["ente"], "") or "").strip()
+                dia_semana = _dia_semana_desde_valor(row.get(resolved["dia_semana"]))
+                hora_inicio = _hora_texto_desde_valor(row.get(resolved["hora_inicio"]))
+                hora_fin = _hora_texto_desde_valor(row.get(resolved["hora_fin"]))
+                fecha_inicio_vigencia = _fecha_texto_desde_valor(row.get(resolved["fecha_inicio_vigencia"]))
+
+                if not rfc or not ente or dia_semana is None or not hora_inicio or not hora_fin or not fecha_inicio_vigencia:
+                    continue
+
+                horarios.append({
+                    "rfc": rfc,
+                    "nombre": str(row.get(resolved.get("nombre", ""), "") or "").strip(),
+                    "ente": ente,
+                    "cargo": str(row.get(resolved.get("cargo", ""), "") or "").strip(),
+                    "dia_semana": dia_semana,
+                    "hora_inicio": hora_inicio,
+                    "hora_fin": hora_fin,
+                    "fecha_inicio_vigencia": fecha_inicio_vigencia,
+                    "fecha_fin_vigencia": _fecha_texto_desde_valor(row.get(resolved.get("fecha_fin_vigencia", ""), "")),
+                    "periodo": str(row.get(resolved.get("periodo", ""), "") or "").strip(),
+                    "observaciones": str(row.get(resolved.get("observaciones", ""), "") or "").strip(),
+                    "estatus": str(row.get(resolved.get("estatus", ""), "") or "activo").strip().lower() or "activo",
+                    "origen": "archivo",
+                })
+
+    return horarios, alertas
+
+
+def _demo_qnas(*numeros):
+    return {f"QNA{int(numero)}": 1 for numero in numeros}
+
+
+def _build_demo_records():
+    return [
+        {
+            "rfc": "DEMJ800101AAA",
+            "ente": "SEPE",
+            "nombre": "JUAN PEREZ DEMO",
+            "puesto": "ANALISTA ADMINISTRATIVO",
+            "fecha_ingreso": "2024-01-01",
+            "fecha_egreso": None,
+            "monto": 182450.0,
+            "qnas": _demo_qnas(1, 2, 3),
+        },
+        {
+            "rfc": "DEMJ800101AAA",
+            "ente": "USET",
+            "nombre": "JUAN PEREZ DEMO",
+            "puesto": "ENLACE OPERATIVO",
+            "fecha_ingreso": "2024-01-15",
+            "fecha_egreso": None,
+            "monto": 169880.0,
+            "qnas": _demo_qnas(2, 3, 4),
+        },
+        {
+            "rfc": "DEMM820202BBB",
+            "ente": "USET",
+            "nombre": "MARIA LOPEZ DEMO",
+            "puesto": "CAPTURISTA",
+            "fecha_ingreso": "2024-02-01",
+            "fecha_egreso": None,
+            "monto": 138400.0,
+            "qnas": _demo_qnas(5, 6),
+        },
+        {
+            "rfc": "DEMM820202BBB",
+            "ente": "TOCATLÁN",
+            "nombre": "MARIA LOPEZ DEMO",
+            "puesto": "AUXILIAR CONTABLE",
+            "fecha_ingreso": "2024-02-16",
+            "fecha_egreso": None,
+            "monto": 94450.0,
+            "qnas": _demo_qnas(6, 7),
+        },
+        {
+            "rfc": "DEMP830303CCC",
+            "ente": "APIZACO",
+            "nombre": "PEDRO HERNANDEZ DEMO",
+            "puesto": "SUPERVISOR",
+            "fecha_ingreso": "2024-03-01",
+            "fecha_egreso": None,
+            "monto": 123000.0,
+            "qnas": _demo_qnas(8, 9),
+        },
+        {
+            "rfc": "DEMP830303CCC",
+            "ente": "TLAXCALA",
+            "nombre": "PEDRO HERNANDEZ DEMO",
+            "puesto": "COORDINADOR MUNICIPAL",
+            "fecha_ingreso": "2024-03-01",
+            "fecha_egreso": None,
+            "monto": 117500.0,
+            "qnas": _demo_qnas(9, 10),
+        },
+        {
+            "rfc": "DEML840404DDD",
+            "ente": "OMG",
+            "nombre": "LAURA GARCIA DEMO",
+            "puesto": "JEFA DE DEPARTAMENTO",
+            "fecha_ingreso": "2024-01-10",
+            "fecha_egreso": None,
+            "monto": 214320.0,
+            "qnas": _demo_qnas(11, 12),
+        },
+        {
+            "rfc": "DEML840404DDD",
+            "ente": "SMYT",
+            "nombre": "LAURA GARCIA DEMO",
+            "puesto": "ASESORA TECNICA",
+            "fecha_ingreso": "2024-01-10",
+            "fecha_egreso": None,
+            "monto": 186250.0,
+            "qnas": _demo_qnas(12, 13),
+        },
+        {
+            "rfc": "DEMS850505EEE",
+            "ente": "SOTYV",
+            "nombre": "SAUL ORTEGA DEMO",
+            "puesto": "REVISOR DE OBRA",
+            "fecha_ingreso": "2024-04-01",
+            "fecha_egreso": None,
+            "monto": 145000.0,
+            "qnas": _demo_qnas(14, 15),
+        },
+        {
+            "rfc": "DEMS850505EEE",
+            "ente": "CHIAUTEMPAN",
+            "nombre": "SAUL ORTEGA DEMO",
+            "puesto": "SUPERVISOR MUNICIPAL",
+            "fecha_ingreso": "2024-04-01",
+            "fecha_egreso": None,
+            "monto": 90800.0,
+            "qnas": _demo_qnas(15, 16),
+        },
+        {
+            "rfc": "DEMA860606FFF",
+            "ente": "SEPE",
+            "nombre": "ANA MARTINEZ DEMO",
+            "puesto": "ENLACE ACADEMICO",
+            "fecha_ingreso": "2024-05-01",
+            "fecha_egreso": None,
+            "monto": 152300.0,
+            "qnas": _demo_qnas(17),
+        },
+        {
+            "rfc": "DEMA860606FFF",
+            "ente": "USET",
+            "nombre": "ANA MARTINEZ DEMO",
+            "puesto": "COORDINADORA EDUCATIVA",
+            "fecha_ingreso": "2024-05-01",
+            "fecha_egreso": None,
+            "monto": 161700.0,
+            "qnas": _demo_qnas(17, 18),
+        },
+        {
+            "rfc": "DEMA860606FFF",
+            "ente": "HUAMANTLA",
+            "nombre": "ANA MARTINEZ DEMO",
+            "puesto": "ASESORA EXTERNA",
+            "fecha_ingreso": "2024-05-15",
+            "fecha_egreso": None,
+            "monto": 87000.0,
+            "qnas": _demo_qnas(18),
+        },
+        {
+            "rfc": "DEMN870707GGG",
+            "ente": "SSC",
+            "nombre": "NORA CASTILLO DEMO",
+            "puesto": "ANALISTA DE CONTROL",
+            "fecha_ingreso": "2024-06-01",
+            "fecha_egreso": None,
+            "monto": 132000.0,
+            "qnas": _demo_qnas(19, 20),
+        },
+        {
+            "rfc": "DEMN870707GGG",
+            "ente": "APIZACO",
+            "nombre": "NORA CASTILLO DEMO",
+            "puesto": "CONSULTORA",
+            "fecha_ingreso": "2024-06-15",
+            "fecha_egreso": None,
+            "monto": 65000.0,
+            "qnas": _demo_qnas(21, 22),
+        },
+    ]
+
+
+def _seed_demo_records():
+    demo_records = []
+    for record in _build_demo_records():
+        ente_clave = db_manager.normalizar_ente_clave(record["ente"]) or record["ente"]
+        demo_records.append({**record, "ente": ente_clave})
+    return db_manager.guardar_registros_individuales(demo_records)
+
+
+def _parse_date(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _parse_time(value):
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%H:%M", "%H:%M:%S"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+    return None
+
+
+def hay_traslape_de_horas(inicio_a, fin_a, inicio_b, fin_b):
+    return inicio_a < fin_b and inicio_b < fin_a
+
+
+def hay_traslape_de_fechas(inicio_a, fin_a, inicio_b, fin_b):
+    fecha_fin_a = fin_a or date.max
+    fecha_fin_b = fin_b or date.max
+    return inicio_a <= fecha_fin_b and inicio_b <= fecha_fin_a
+
+
+def calcular_minutos_traslapados(inicio_a, fin_a, inicio_b, fin_b):
+    dt_base = date(2000, 1, 1)
+    left_start = datetime.combine(dt_base, inicio_a)
+    left_end = datetime.combine(dt_base, fin_a)
+    right_start = datetime.combine(dt_base, inicio_b)
+    right_end = datetime.combine(dt_base, fin_b)
+    overlap_start = max(left_start, right_start)
+    overlap_end = min(left_end, right_end)
+    minutes = int((overlap_end - overlap_start).total_seconds() // 60)
+    return max(minutes, 0)
+
+
+def calcular_severidad_cruce(minutos_traslape):
+    if minutos_traslape > 120:
+        return "alta"
+    if minutos_traslape >= 31:
+        return "media"
+    if minutos_traslape >= 1:
+        return "baja"
+    return "sin-cruce"
+
+
+def generar_observacion_de_cruce(conflicto):
+    texto = (
+        f"Se detectó que la persona {conflicto['nombre']} cuenta con horarios activos en más de un ente "
+        f"durante el mismo día y rango horario. El día {conflicto['dia_label']}, presenta un cruce entre "
+        f"{conflicto['ente_a_display']} de {conflicto['hora_inicio_a']} a {conflicto['hora_fin_a']} y "
+        f"{conflicto['ente_b_display']} de {conflicto['hora_inicio_b']} a {conflicto['hora_fin_b']}, "
+        f"con un traslape aproximado de {conflicto['minutos_traslape']} minutos. "
+        f"Se recomienda revisar la compatibilidad del horario y solicitar aclaración documental."
+    )
+    if conflicto["severidad"] == "alta":
+        recomendacion = "Revisión inmediata y requerimiento documental prioritario."
+    elif conflicto["severidad"] == "media":
+        recomendacion = "Validar soporte institucional y compatibilidad de jornada."
+    else:
+        recomendacion = "Registrar evidencia y confirmar distribución operativa."
+    return texto, recomendacion
+
+
+def _build_conflicto_hash(conflicto):
+    partes = [
+        conflicto["rfc"],
+        str(conflicto["dia_semana"]),
+        "|".join(sorted([conflicto["ente_a"], conflicto["ente_b"]])),
+        conflicto["hora_inicio_a"],
+        conflicto["hora_fin_a"],
+        conflicto["hora_inicio_b"],
+        conflicto["hora_fin_b"],
+        conflicto["fecha_inicio_a"] or "",
+        conflicto["fecha_fin_a"] or "",
+        conflicto["fecha_inicio_b"] or "",
+        conflicto["fecha_fin_b"] or "",
+    ]
+    return "|".join(partes)
+
+
+def detectar_cruces_de_horarios(horarios):
+    horarios_activos = []
+    for horario in horarios or []:
+        if str(horario.get("estatus") or "activo").strip().lower() == "inactivo":
+            continue
+        hora_inicio = _parse_time(horario.get("hora_inicio"))
+        hora_fin = _parse_time(horario.get("hora_fin"))
+        fecha_inicio = _parse_date(horario.get("fecha_inicio_vigencia"))
+        fecha_fin = _parse_date(horario.get("fecha_fin_vigencia"))
+        if not hora_inicio or not hora_fin or not fecha_inicio or hora_inicio >= hora_fin:
+            continue
+        horarios_activos.append({**horario, "_hora_inicio": hora_inicio, "_hora_fin": hora_fin, "_fecha_inicio": fecha_inicio, "_fecha_fin": fecha_fin})
+
+    conflictos = []
+    seen_conflicts = set()
+    grouped = {}
+
+    for left, right in combinations(horarios_activos, 2):
+        if str(left.get("rfc") or "").strip().upper() != str(right.get("rfc") or "").strip().upper():
+            continue
+        if int(left.get("dia_semana", -1)) != int(right.get("dia_semana", -1)):
+            continue
+        if (left.get("ente") or "") == (right.get("ente") or "") and (left.get("permite_traslape_interno") or right.get("permite_traslape_interno")):
+            continue
+        if not hay_traslape_de_fechas(left["_fecha_inicio"], left["_fecha_fin"], right["_fecha_inicio"], right["_fecha_fin"]):
+            continue
+        if not hay_traslape_de_horas(left["_hora_inicio"], left["_hora_fin"], right["_hora_inicio"], right["_hora_fin"]):
+            continue
+
+        minutos = calcular_minutos_traslapados(left["_hora_inicio"], left["_hora_fin"], right["_hora_inicio"], right["_hora_fin"])
+        if minutos <= 0:
+            continue
+
+        ente_a, ente_b = sorted([left.get("ente") or "", right.get("ente") or ""])
+        first = left if (left.get("ente") or "") == ente_a else right
+        second = right if first is left else left
+
+        conflicto = {
+            "rfc": str(first.get("rfc") or "").strip().upper(),
+            "nombre": str(first.get("nombre") or second.get("nombre") or "").strip(),
+            "ente_a": ente_a,
+            "ente_b": ente_b,
+            "ente_a_display": _ente_display(ente_a),
+            "ente_b_display": _ente_display(ente_b),
+            "dia_semana": int(first.get("dia_semana", 0)),
+            "dia_label": WEEK_DAYS[int(first.get("dia_semana", 0))][1],
+            "hora_inicio_a": str(first.get("hora_inicio") or "").strip(),
+            "hora_fin_a": str(first.get("hora_fin") or "").strip(),
+            "hora_inicio_b": str(second.get("hora_inicio") or "").strip(),
+            "hora_fin_b": str(second.get("hora_fin") or "").strip(),
+            "cargo_a": str(first.get("cargo") or "").strip(),
+            "cargo_b": str(second.get("cargo") or "").strip(),
+            "fecha_inicio_a": str(first.get("fecha_inicio_vigencia") or "").strip(),
+            "fecha_fin_a": str(first.get("fecha_fin_vigencia") or "").strip(),
+            "fecha_inicio_b": str(second.get("fecha_inicio_vigencia") or "").strip(),
+            "fecha_fin_b": str(second.get("fecha_fin_vigencia") or "").strip(),
+            "periodo_a": str(first.get("periodo") or "").strip(),
+            "periodo_b": str(second.get("periodo") or "").strip(),
+            "horario_a_id": first.get("id"),
+            "horario_b_id": second.get("id"),
+            "minutos_traslape": minutos,
+            "severidad": calcular_severidad_cruce(minutos),
+            "estatus_revision": "pendiente",
+        }
+        conflicto["conflicto_hash"] = _build_conflicto_hash(conflicto)
+        if conflicto["conflicto_hash"] in seen_conflicts:
+            continue
+        seen_conflicts.add(conflicto["conflicto_hash"])
+        texto, recomendacion = generar_observacion_de_cruce(conflicto)
+        conflicto["observacion_automatica"] = texto
+        conflicto["recomendacion"] = recomendacion
+        conflictos.append(conflicto)
+        grouped.setdefault(conflicto["rfc"], {
+            "rfc": conflicto["rfc"],
+            "nombre": conflicto["nombre"],
+            "entes": set(),
+            "horarios": 0,
+            "conflictos": [],
+            "severidad_maxima": "baja",
+        })
+        grouped[conflicto["rfc"]]["entes"].update([conflicto["ente_a_display"], conflicto["ente_b_display"]])
+        grouped[conflicto["rfc"]]["conflictos"].append(conflicto)
+        grouped[conflicto["rfc"]]["horarios"] += 2
+        severidad_actual = {"baja": 1, "media": 2, "alta": 3}
+        if severidad_actual.get(conflicto["severidad"], 0) > severidad_actual.get(grouped[conflicto["rfc"]]["severidad_maxima"], 0):
+            grouped[conflicto["rfc"]]["severidad_maxima"] = conflicto["severidad"]
+
+    personas = []
+    for person in grouped.values():
+        personas.append({
+            "rfc": person["rfc"],
+            "nombre": person["nombre"],
+            "entes": sorted(person["entes"]),
+            "numero_entes": len(person["entes"]),
+            "numero_horarios": len({
+                item
+                for conflicto in person["conflictos"]
+                for item in (conflicto["horario_a_id"], conflicto["horario_b_id"])
+            }),
+            "numero_conflictos": len(person["conflictos"]),
+            "severidad_maxima": person["severidad_maxima"],
+            "conflictos": person["conflictos"],
+        })
+
+    personas.sort(key=lambda item: (-item["numero_conflictos"], item["nombre"], item["rfc"]))
+    conflictos.sort(key=lambda item: ({"alta": 0, "media": 1, "baja": 2}.get(item["severidad"], 3), item["nombre"], item["dia_semana"]))
+    return {"conflictos": conflictos, "personas": personas}
+
+
+def calcular_periodo_quincenal(fecha_valor):
+    fecha = _parse_date(fecha_valor) if not isinstance(fecha_valor, date) else fecha_valor
+    if not fecha:
+        return None
+    periodos = db_manager.listar_periodos_quincenales(ejercicio=fecha.year)
+    for periodo in periodos:
+        inicio = _parse_date(periodo.get("fecha_inicio"))
+        fin = _parse_date(periodo.get("fecha_fin"))
+        if inicio and fin and inicio <= fecha <= fin:
+            return periodo
+    return None
+
+
+def calcular_pago_pdp(registro, periodo_quincenal, conflicto_hash=None):
+    sueldo_base = float(registro.get("monto") or 0)
+    monto_pdp = round(sueldo_base / 24.0, 2) if sueldo_base else 0.0
+    deducciones = float(registro.get("deducciones") or 0)
+    percepciones_adicionales = float(registro.get("percepciones_adicionales") or 0)
+    total = round(monto_pdp - deducciones + percepciones_adicionales, 2)
+    estatus = "observado" if conflicto_hash else "calculado"
+    observaciones = "Pago marcado con observación por conflicto de horario en el periodo." if conflicto_hash else ""
+    return {
+        "rfc": str(registro.get("rfc") or "").strip().upper(),
+        "nombre": str(registro.get("nombre") or "").strip(),
+        "ente": registro.get("ente"),
+        "periodo_quincenal": periodo_quincenal["etiqueta"],
+        "fecha_inicio_periodo": periodo_quincenal["fecha_inicio"],
+        "fecha_fin_periodo": periodo_quincenal["fecha_fin"],
+        "sueldo_base": sueldo_base,
+        "monto_pdp": monto_pdp,
+        "deducciones": deducciones,
+        "percepciones_adicionales": percepciones_adicionales,
+        "total_calculado": total,
+        "estatus": estatus,
+        "observaciones": observaciones,
+        "conflicto_hash": conflicto_hash,
+    }
+
+
+def marcar_pago_observado_por_cruce(pago, conflicto_hash):
+    pago = dict(pago)
+    pago["estatus"] = "observado"
+    pago["conflicto_hash"] = conflicto_hash
+    pago["observaciones"] = "Pago con observación derivada de conflicto de horario."
+    return pago
+
+
+def _query_param(name, default=""):
+    return str(request.args.get(name, default) or default).strip()
+
+
+def _visible_catalog_rows():
+    rows = db_manager._get_catalog_snapshot()["rows"]
+    entes_usuario = session.get("entes", [])
+    modo_permiso = "ALL" if _es_usuario_luis() else _allowed_all(entes_usuario)
+    visibles = []
+    for row in rows:
+        clave = str(row.get("clave") or "").strip()
+        if not clave:
+            continue
+        if _puede_ver_ente(clave, entes_usuario, modo_permiso):
+            visibles.append(row)
+    return visibles
+
+
+def _horarios_filters_from_request():
+    filtros = {
+        "rfc": _query_param("rfc"),
+        "ente": _query_param("ente"),
+        "dia_semana": _query_param("dia_semana"),
+        "estatus": _query_param("estatus"),
+        "nombre": _query_param("nombre"),
+        "fecha_desde": _query_param("fecha_desde"),
+        "fecha_hasta": _query_param("fecha_hasta"),
+    }
+    if filtros["dia_semana"] == "":
+        filtros["dia_semana"] = None
+    return filtros
+
+
+def _filtrar_horarios_visibles(horarios):
+    entes_usuario = session.get("entes", [])
+    modo_permiso = "ALL" if _es_usuario_luis() else _allowed_all(entes_usuario)
+    visibles = []
+    for horario in horarios or []:
+        ente = str(horario.get("ente") or "").strip()
+        if ente and _puede_ver_ente(ente, entes_usuario, modo_permiso):
+            visibles.append(horario)
+    return visibles
+
+
+def _listar_registros_operativos(filtros=None):
+    filtros = filtros or {}
+    clauses = []
+    params = []
+    if filtros.get("rfc"):
+        clauses.append("UPPER(rfc)=UPPER(?)")
+        params.append(str(filtros["rfc"]).strip())
+    if filtros.get("ente"):
+        ente_clave = db_manager.normalizar_ente_clave(filtros["ente"]) or str(filtros["ente"]).strip()
+        clauses.append("ente=?")
+        params.append(ente_clave)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    conn = db_manager._connect()
+    cur = conn.cursor()
+    cur.execute(f"""
+        SELECT rfc, ente, nombre, puesto, fecha_ingreso, fecha_egreso, monto, qnas, fecha_actualizacion
+        FROM registros_laborales
+        {where_sql}
+        ORDER BY nombre, rfc, ente
+    """, params)
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+
+    for row in rows:
+        try:
+            row["qnas"] = json.loads(row.get("qnas") or "{}")
+        except Exception:
+            row["qnas"] = {}
+    return rows
+
+
+def _group_conflictos_por_hash(observaciones):
+    return {
+        str(item.get("conflicto_hash") or "").strip(): item
+        for item in observaciones or []
+        if str(item.get("conflicto_hash") or "").strip()
+    }
+
+
+def _sync_observaciones_de_conflictos(conflictos):
+    existentes = _group_conflictos_por_hash(db_manager.listar_observaciones_cruce())
+    for conflicto in conflictos or []:
+        actual = existentes.get(conflicto["conflicto_hash"], {})
+        db_manager.upsert_observacion_cruce({
+            "conflicto_hash": conflicto["conflicto_hash"],
+            "rfc": conflicto["rfc"],
+            "nombre": conflicto["nombre"],
+            "ente_a": conflicto["ente_a"],
+            "ente_b": conflicto["ente_b"],
+            "dia_semana": conflicto["dia_semana"],
+            "horario_a": f"{conflicto['hora_inicio_a']} - {conflicto['hora_fin_a']}",
+            "horario_b": f"{conflicto['hora_inicio_b']} - {conflicto['hora_fin_b']}",
+            "minutos_traslape": conflicto["minutos_traslape"],
+            "fecha_inicio_a": conflicto["fecha_inicio_a"],
+            "fecha_fin_a": conflicto["fecha_fin_a"],
+            "fecha_inicio_b": conflicto["fecha_inicio_b"],
+            "fecha_fin_b": conflicto["fecha_fin_b"],
+            "severidad": conflicto["severidad"],
+            "texto_observacion": conflicto["observacion_automatica"],
+            "recomendacion": conflicto["recomendacion"],
+            "estatus": str(actual.get("estatus") or "pendiente").strip().lower(),
+            "comentarios_adicionales": actual.get("comentarios_adicionales", ""),
+            "referencia_documental": actual.get("referencia_documental", ""),
+            "creado_por": actual.get("creado_por", session.get("usuario", "")),
+        }, usuario=session.get("usuario", ""))
+
+
+def _enriquecer_conflictos_con_observaciones(conflictos):
+    observaciones = _group_conflictos_por_hash(db_manager.listar_observaciones_cruce())
+    enriched = []
+    for conflicto in conflictos or []:
+        observacion = observaciones.get(conflicto["conflicto_hash"], {})
+        enriched.append({
+            **conflicto,
+            "estatus_revision": str(observacion.get("estatus") or "pendiente").strip().lower(),
+            "comentarios_adicionales": str(observacion.get("comentarios_adicionales") or "").strip(),
+            "referencia_documental": str(observacion.get("referencia_documental") or "").strip(),
+            "fecha_revision": observacion.get("actualizado") or observacion.get("creado") or "",
+        })
+    return enriched
+
+
+def _resumen_observaciones(observaciones):
+    conteo = {"pendiente": 0, "revisada": 0, "solventada": 0, "descartada": 0}
+    severidad = {"alta": 0, "media": 0, "baja": 0}
+    for item in observaciones or []:
+        estatus = str(item.get("estatus") or "pendiente").strip().lower()
+        sev = str(item.get("severidad") or "baja").strip().lower()
+        conteo[estatus] = conteo.get(estatus, 0) + 1
+        severidad[sev] = severidad.get(sev, 0) + 1
+    return {"estatus": conteo, "severidad": severidad, "total": len(observaciones or [])}
+
+
+def _conflicto_aplica_a_periodo(conflicto, periodo):
+    inicio_periodo = _parse_date(periodo.get("fecha_inicio"))
+    fin_periodo = _parse_date(periodo.get("fecha_fin"))
+    if not inicio_periodo or not fin_periodo:
+        return False
+    inicio_a = _parse_date(conflicto.get("fecha_inicio_a"))
+    fin_a = _parse_date(conflicto.get("fecha_fin_a"))
+    inicio_b = _parse_date(conflicto.get("fecha_inicio_b"))
+    fin_b = _parse_date(conflicto.get("fecha_fin_b"))
+    return (
+        inicio_a
+        and inicio_b
+        and hay_traslape_de_fechas(inicio_periodo, fin_periodo, inicio_a, fin_a)
+        and hay_traslape_de_fechas(inicio_periodo, fin_periodo, inicio_b, fin_b)
+    )
+
+
+def _calcular_pagos_pdp_para_periodo(periodo, filtros=None, persistir=False):
+    filtros = filtros or {}
+    registros = _listar_registros_operativos(filtros=filtros)
+    horarios = _filtrar_horarios_visibles(db_manager.listar_horarios_persona())
+    conflictos_data = detectar_cruces_de_horarios(horarios)
+    conflictos_periodo = [
+        conflicto
+        for conflicto in conflictos_data["conflictos"]
+        if _conflicto_aplica_a_periodo(conflicto, periodo)
+    ]
+
+    conflictos_por_rfc = {}
+    for conflicto in conflictos_periodo:
+        conflictos_por_rfc.setdefault(conflicto["rfc"], []).append(conflicto)
+
+    pagos = []
+    for registro in registros:
+        rfc = str(registro.get("rfc") or "").strip().upper()
+        conflicto_hash = ""
+        for conflicto in conflictos_por_rfc.get(rfc, []):
+            if registro.get("ente") in {conflicto.get("ente_a"), conflicto.get("ente_b")}:
+                conflicto_hash = conflicto["conflicto_hash"]
+                break
+        pago = calcular_pago_pdp(registro, periodo, conflicto_hash=conflicto_hash or None)
+        pagos.append(pago)
+        if persistir:
+            db_manager.upsert_pago_pdp(pago, usuario=session.get("usuario", ""))
+    return pagos, conflictos_periodo
+
+
+def _build_horarios_context(filtros, edit_id=None):
+    horarios = _filtrar_horarios_visibles(db_manager.listar_horarios_persona(filtros=filtros))
+    persona_horarios = {}
+    ente_horarios = {}
+    for horario in horarios:
+        persona_horarios.setdefault(horario["rfc"], []).append(horario)
+        ente_horarios.setdefault(horario["ente"], []).append(horario)
+
+    active_rows = [h for h in horarios if str(h.get("estatus") or "activo").lower() == "activo"]
+    edit_item = db_manager.obtener_horario_persona(edit_id) if edit_id else None
+    if edit_item and not _can_edit_ente(edit_item.get("ente")):
+        edit_item = None
+
+    selected_rfc = filtros.get("rfc") or (edit_item or {}).get("rfc") or ""
+    persona_detalle = {
+        "rfc": selected_rfc,
+        "nombre": db_manager.obtener_nombre_persona_por_rfc(selected_rfc) if selected_rfc else "",
+        "horarios": persona_horarios.get(selected_rfc, []),
+    } if selected_rfc else None
+
+    ente_ref = filtros.get("ente") or ""
+    ente_clave = db_manager.normalizar_ente_clave(ente_ref) if ente_ref else ""
+    ente_detalle = {
+        "ente": ente_clave,
+        "ente_display": _ente_display(ente_clave),
+        "horarios": ente_horarios.get(ente_clave, []),
+    } if ente_clave else None
+
+    return {
+        "filtros": filtros,
+        "horarios": horarios,
+        "horarios_stats": {
+            "total": len(horarios),
+            "activos": len(active_rows),
+            "personas": len(persona_horarios),
+            "entes": len(ente_horarios),
+        },
+        "catalogo_visible": _visible_catalog_rows(),
+        "week_days": WEEK_DAYS,
+        "edit_horario": edit_item,
+        "persona_detalle": persona_detalle,
+        "ente_detalle": ente_detalle,
+    }
+
+
+def _build_cruces_context(filtros):
+    horarios = _filtrar_horarios_visibles(db_manager.listar_horarios_persona())
+    data = detectar_cruces_de_horarios(horarios)
+    _sync_observaciones_de_conflictos(data["conflictos"])
+    conflictos = _enriquecer_conflictos_con_observaciones(data["conflictos"])
+
+    if filtros.get("rfc"):
+        conflictos = [c for c in conflictos if c["rfc"] == filtros["rfc"].upper()]
+    if filtros.get("ente"):
+        ente_clave = db_manager.normalizar_ente_clave(filtros["ente"]) or filtros["ente"]
+        conflictos = [c for c in conflictos if ente_clave in {c["ente_a"], c["ente_b"]}]
+    if filtros.get("severidad"):
+        conflictos = [c for c in conflictos if c["severidad"] == filtros["severidad"]]
+    if filtros.get("estatus"):
+        conflictos = [c for c in conflictos if c["estatus_revision"] == filtros["estatus"]]
+    if filtros.get("periodo"):
+        periodo_sel = db_manager.get_periodo_quincenal(filtros["periodo"])
+        if periodo_sel:
+            conflictos = [c for c in conflictos if _conflicto_aplica_a_periodo(c, periodo_sel)]
+
+    personas_index = {}
+    for conflicto in conflictos:
+        persona = personas_index.setdefault(conflicto["rfc"], {
+            "rfc": conflicto["rfc"],
+            "nombre": conflicto["nombre"],
+            "entes": set(),
+            "numero_horarios": 0,
+            "numero_conflictos": 0,
+            "severidad_maxima": "baja",
+            "ultima_revision": conflicto.get("fecha_revision") or "",
+            "estatus_revision": conflicto["estatus_revision"],
+            "conflictos": [],
+        })
+        persona["entes"].update([conflicto["ente_a_display"], conflicto["ente_b_display"]])
+        persona["numero_conflictos"] += 1
+        persona["conflictos"].append(conflicto)
+        persona["numero_horarios"] = len({
+            item
+            for registro in persona["conflictos"]
+            for item in (registro["horario_a_id"], registro["horario_b_id"])
+        })
+        if conflicto.get("fecha_revision"):
+            persona["ultima_revision"] = max(persona["ultima_revision"], conflicto["fecha_revision"])
+        ranking = {"baja": 1, "media": 2, "alta": 3}
+        if ranking.get(conflicto["severidad"], 0) > ranking.get(persona["severidad_maxima"], 0):
+            persona["severidad_maxima"] = conflicto["severidad"]
+        if persona["estatus_revision"] != conflicto["estatus_revision"]:
+            persona["estatus_revision"] = "mixto"
+
+    personas = []
+    for persona in personas_index.values():
+        persona["entes"] = sorted(persona["entes"])
+        persona["numero_entes"] = len(persona["entes"])
+        personas.append(persona)
+    personas.sort(key=lambda item: (-item["numero_conflictos"], item["nombre"], item["rfc"]))
+
+    return {
+        "filtros": filtros,
+        "personas": personas,
+        "conflictos": conflictos,
+        "periodos_quincenales": db_manager.listar_periodos_quincenales(),
+        "catalogo_visible": _visible_catalog_rows(),
+        "resumen": {
+            "personas": len(personas),
+            "conflictos": len(conflictos),
+            "alta": sum(1 for c in conflictos if c["severidad"] == "alta"),
+            "media": sum(1 for c in conflictos if c["severidad"] == "media"),
+            "baja": sum(1 for c in conflictos if c["severidad"] == "baja"),
+        },
+    }
+
+
+def _build_observaciones_context(filtros):
+    rows = db_manager.listar_observaciones_cruce(filtros=filtros)
+    entes_usuario = session.get("entes", [])
+    modo_permiso = "ALL" if _es_usuario_luis() else _allowed_all(entes_usuario)
+    rows = [
+        row for row in rows
+        if _puede_ver_ente(row.get("ente_a"), entes_usuario, modo_permiso)
+        or _puede_ver_ente(row.get("ente_b"), entes_usuario, modo_permiso)
+    ]
+    return {
+        "filtros": filtros,
+        "observaciones": rows,
+        "catalogo_visible": _visible_catalog_rows(),
+        "resumen": _resumen_observaciones(rows),
+    }
+
+
+def _build_pdp_context(filtros, recalcular=False):
+    periodo_sel = filtros.get("periodo_quincenal") or ""
+    periodo = db_manager.get_periodo_quincenal(periodo_sel) if periodo_sel else calcular_periodo_quincenal(date.today())
+    pagos = []
+    conflictos_periodo = []
+    if periodo:
+        if recalcular:
+            pagos, conflictos_periodo = _calcular_pagos_pdp_para_periodo(periodo, filtros=filtros, persistir=True)
+        pagos = db_manager.listar_pagos_pdp({
+            "periodo_quincenal": periodo["etiqueta"],
+            "ente": filtros.get("ente"),
+            "rfc": filtros.get("rfc"),
+            "estatus": filtros.get("estatus"),
+        })
+        if not pagos:
+            pagos, conflictos_periodo = _calcular_pagos_pdp_para_periodo(periodo, filtros=filtros, persistir=False)
+        else:
+            conflictos_periodo = [
+                conflicto
+                for conflicto in detectar_cruces_de_horarios(_filtrar_horarios_visibles(db_manager.listar_horarios_persona()))["conflictos"]
+                if _conflicto_aplica_a_periodo(conflicto, periodo)
+            ]
+
+    return {
+        "filtros": filtros,
+        "periodo_actual": periodo,
+        "periodos_quincenales": db_manager.listar_periodos_quincenales(),
+        "pagos": pagos,
+        "conflictos_periodo": conflictos_periodo,
+        "catalogo_visible": _visible_catalog_rows(),
+        "resumen": {
+            "total": len(pagos),
+            "observados": sum(1 for pago in pagos if str(pago.get("estatus") or "").lower() == "observado"),
+            "calculados": sum(1 for pago in pagos if str(pago.get("estatus") or "").lower() == "calculado"),
+            "monto_total": round(sum(float(pago.get("total_calculado") or 0) for pago in pagos), 2),
+        },
+    }
+
+
+def _build_reportes_context(filtros):
+    cruces_context = _build_cruces_context({
+        "rfc": filtros.get("rfc", ""),
+        "ente": filtros.get("ente", ""),
+        "severidad": filtros.get("severidad", ""),
+        "estatus": filtros.get("estatus", ""),
+        "periodo": filtros.get("periodo_quincenal", ""),
+    })
+    observaciones_context = _build_observaciones_context({
+        "rfc": filtros.get("rfc", ""),
+        "ente": filtros.get("ente", ""),
+        "severidad": filtros.get("severidad", ""),
+        "estatus": filtros.get("estatus", ""),
+    })
+    pdp_context = _build_pdp_context({
+        "periodo_quincenal": filtros.get("periodo_quincenal", ""),
+        "ente": filtros.get("ente", ""),
+        "rfc": filtros.get("rfc", ""),
+        "estatus": filtros.get("estatus_pago", ""),
+    })
+
+    por_ente = {}
+    for conflicto in cruces_context["conflictos"]:
+        for ente in (conflicto["ente_a"], conflicto["ente_b"]):
+            card = por_ente.setdefault(ente, {"ente": ente, "personas": set(), "conflictos": 0, "severidad": "baja"})
+            card["personas"].add(conflicto["rfc"])
+            card["conflictos"] += 1
+            if {"baja": 1, "media": 2, "alta": 3}.get(conflicto["severidad"], 0) > {"baja": 1, "media": 2, "alta": 3}.get(card["severidad"], 0):
+                card["severidad"] = conflicto["severidad"]
+    por_ente_rows = [
+        {
+            "ente": key,
+            "ente_display": _ente_display(key),
+            "personas": len(value["personas"]),
+            "conflictos": value["conflictos"],
+            "severidad": value["severidad"],
+        }
+        for key, value in por_ente.items()
+    ]
+    por_ente_rows.sort(key=lambda item: (-item["conflictos"], item["ente_display"]))
+
+    return {
+        "filtros": filtros,
+        "catalogo_visible": _visible_catalog_rows(),
+        "periodos_quincenales": db_manager.listar_periodos_quincenales(),
+        "cruces": cruces_context,
+        "observaciones": observaciones_context,
+        "pdp": pdp_context,
+        "por_ente": por_ente_rows,
+        "generado_en": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "responsable": session.get("nombre") or session.get("usuario") or "SISTEMA",
+    }
+
+
+def _build_resultados_monitor():
+    context = _build_reportes_context({
+        "periodo_quincenal": "",
+        "ente": "",
+        "rfc": "",
+        "severidad": "",
+        "estatus": "",
+        "estatus_pago": "",
+    })
+    return {
+        "resumen": {
+            "cruces_horario": context["cruces"]["resumen"]["conflictos"],
+            "personas_con_cruce": context["cruces"]["resumen"]["personas"],
+            "observaciones": context["observaciones"]["resumen"]["total"],
+            "pagos_observados": context["pdp"]["resumen"]["observados"],
+        },
+        "personas": context["cruces"]["personas"][:5],
+        "observaciones": context["observaciones"]["observaciones"][:5],
+        "pdp": context["pdp"]["pagos"][:5],
+    }
 
 
 @app.route("/", methods=["GET", "POST"])
@@ -227,11 +1522,48 @@ def logout():
 # -----------------------------------------------------------
 @app.route("/dashboard")
 def dashboard():
+    dashboard_context = _build_dashboard_context()
     return render_template(
         "dashboard.html",
         nombre=session.get("nombre"),
         usuario=session.get("usuario"),
+        **dashboard_context,
     )
+
+
+@app.route("/api/dashboard/archivos-procesados")
+def dashboard_processed_files_api():
+    if not session.get("autenticado"):
+        return jsonify({"error": "No autorizado"}), 403
+    items = _build_dashboard_processed_files()
+    drawer = _build_dashboard_processed_drawer()
+    return jsonify({
+        "items": items,
+        "total": len(items),
+        "secciones": drawer,
+    })
+
+
+@app.route("/dashboard/seed-demo", methods=["POST"])
+def seed_demo_dashboard():
+    if not session.get("autenticado"):
+        return jsonify({"error": "No autorizado"}), 403
+
+    try:
+        insertados, actualizados = _seed_demo_records()
+        summary = _build_dashboard_cross_summary()
+        return jsonify({
+            "mensaje": "Datos de ejemplo cargados correctamente.",
+            "insertados": insertados,
+            "actualizados": actualizados,
+            "cruces_totales": summary["total"],
+            "ente_ente": summary["ente_ente"]["count"],
+            "ente_municipio": summary["ente_municipio"]["count"],
+            "municipio_municipio": summary["municipio_municipio"]["count"],
+        })
+    except Exception as exc:
+        log.exception("Error al cargar datos demo")
+        return jsonify({"error": f"No fue posible cargar los datos demo: {exc}"}), 500
 
 # -----------------------------------------------------------
 # CARGA MASIVA (DataProcessor cruza por RFC y QNAs)
@@ -258,12 +1590,35 @@ def upload_laboral():
 
         log.info("Insertados=%d | Actualizados=%d", n_insertados, n_actualizados)
 
+        observaciones_total = len(alertas)
+        observaciones_warning = observaciones_total
+        guardados_total = n_insertados + n_actualizados
+        guardado_estado = "guardado parcial" if observaciones_total else "guardado completo"
+
         response = {
             "mensaje": f"Procesamiento completado. {n_insertados} nuevos registros, {n_actualizados} actualizados.",
             "total_procesados": len(registros_individuales),
             "insertados": n_insertados,
             "actualizados": n_actualizados,
-            "alertas": alertas
+            "guardados_total": guardados_total,
+            "pendientes_total": max(len(registros_individuales) - guardados_total, 0),
+            "errores_total": 0,
+            "guardado_estado": guardado_estado,
+            "alertas": alertas,
+            "observaciones_total": observaciones_total,
+            "observaciones_por_tipo": {
+                "error": 0,
+                "warning": observaciones_warning,
+                "info": 0,
+            },
+            "archivos_recibidos": len(files),
+            "entes_detectados": sorted({
+                str(registro.get("ente") or "").strip()
+                for registro in registros_individuales
+                if str(registro.get("ente") or "").strip()
+            }),
+            "ultima_actualizacion": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+            "estado": "completed_with_alerts" if alertas else "completed",
         }
 
         return jsonify(response)
@@ -271,6 +1626,292 @@ def upload_laboral():
     except Exception as e:
         log.exception("Error en upload_laboral")
         return jsonify({"error": f"Error al procesar archivos: {e}"}), 500
+
+
+@app.route("/upload_horarios", methods=["POST"])
+def upload_horarios():
+    if not session.get("autenticado"):
+        return jsonify({"error": "No autorizado"}), 403
+
+    try:
+        files = request.files.getlist("files")
+        if not files:
+            return jsonify({"error": "No se enviaron archivos"})
+
+        horarios, alertas = _extract_horarios_from_files(files)
+        if not horarios and alertas:
+            return jsonify({
+                "error": "No fue posible procesar el archivo de horarios.",
+                "alertas": alertas,
+            }), 400
+
+        guardados = 0
+        for horario in horarios:
+            db_manager.guardar_horario_persona(horario, usuario=session.get("usuario", ""))
+            guardados += 1
+
+        response = {
+            "mensaje": f"Carga de horarios completada. {guardados} horario(s) registrados.",
+            "total_procesados": len(horarios),
+            "guardados_total": guardados,
+            "errores_total": 0,
+            "alertas": alertas,
+            "observaciones_total": len(alertas),
+            "estado": "completed_with_alerts" if alertas else "completed",
+            "ultima_actualizacion": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        }
+        return jsonify(response)
+    except Exception as exc:
+        log.exception("Error en upload_horarios")
+        return jsonify({"error": f"Error al procesar horarios: {exc}"}), 500
+
+
+# -----------------------------------------------------------
+# HORARIOS / CRUCES / OBSERVACIONES / PDP / REPORTES
+# -----------------------------------------------------------
+@app.route("/horarios")
+def horarios_home():
+    filtros = _horarios_filters_from_request()
+    edit_id = request.args.get("edit_id", type=int)
+    return render_template("horarios.html", **_build_horarios_context(filtros, edit_id=edit_id))
+
+
+@app.route("/horarios/guardar", methods=["POST"])
+def guardar_horario_persona():
+    horario = {
+        "id": request.form.get("id") or None,
+        "rfc": request.form.get("rfc", ""),
+        "nombre": request.form.get("nombre", ""),
+        "ente": request.form.get("ente", ""),
+        "cargo": request.form.get("cargo", ""),
+        "dia_semana": request.form.get("dia_semana", ""),
+        "hora_inicio": request.form.get("hora_inicio", ""),
+        "hora_fin": request.form.get("hora_fin", ""),
+        "fecha_inicio_vigencia": request.form.get("fecha_inicio_vigencia", ""),
+        "fecha_fin_vigencia": request.form.get("fecha_fin_vigencia", ""),
+        "periodo": request.form.get("periodo", ""),
+        "observaciones": request.form.get("observaciones", ""),
+        "estatus": request.form.get("estatus", "activo"),
+        "permite_traslape_interno": request.form.get("permite_traslape_interno") == "1",
+    }
+    try:
+        db_manager.guardar_horario_persona(horario, usuario=session.get("usuario", ""))
+    except ValueError as exc:
+        filtros = _horarios_filters_from_request()
+        context = _build_horarios_context(filtros)
+        context["form_error"] = str(exc)
+        context["edit_horario"] = horario
+        return render_template("horarios.html", **context), 400
+    return redirect(url_for("horarios_home", rfc=horario["rfc"]))
+
+
+@app.route("/horarios/<int:horario_id>/desactivar", methods=["POST"])
+def desactivar_horario_persona(horario_id):
+    item = db_manager.obtener_horario_persona(horario_id)
+    if not item or not _can_edit_ente(item.get("ente")):
+        return "No autorizado", 403
+    db_manager.desactivar_horario_persona(horario_id, usuario=session.get("usuario", ""))
+    return redirect(url_for("horarios_home", rfc=item.get("rfc", "")))
+
+
+@app.route("/horarios/<int:horario_id>/eliminar", methods=["POST"])
+def eliminar_horario_persona(horario_id):
+    item = db_manager.obtener_horario_persona(horario_id)
+    if not item or not _can_edit_ente(item.get("ente")):
+        return "No autorizado", 403
+    db_manager.eliminar_horario_persona(horario_id)
+    return redirect(url_for("horarios_home", rfc=item.get("rfc", "")))
+
+
+@app.route("/horarios/persona/<rfc>")
+def horarios_por_persona(rfc):
+    return redirect(url_for("horarios_home", rfc=rfc))
+
+
+@app.route("/horarios/ente/<ente>")
+def horarios_por_ente(ente):
+    return redirect(url_for("horarios_home", ente=ente))
+
+
+@app.route("/cruce-entes")
+def cruce_entes():
+    filtros = {
+        "rfc": _query_param("rfc"),
+        "ente": _query_param("ente"),
+        "severidad": _query_param("severidad"),
+        "estatus": _query_param("estatus"),
+        "periodo": _query_param("periodo"),
+    }
+    return render_template("cruces_entes.html", **_build_cruces_context(filtros))
+
+
+@app.route("/observaciones")
+def observaciones_home():
+    filtros = {
+        "rfc": _query_param("rfc"),
+        "ente": _query_param("ente"),
+        "severidad": _query_param("severidad"),
+        "estatus": _query_param("estatus"),
+    }
+    return render_template("observaciones.html", **_build_observaciones_context(filtros))
+
+
+@app.route("/observaciones/actualizar", methods=["POST"])
+def actualizar_observacion_cruce():
+    conflicto_hash = request.form.get("conflicto_hash", "").strip()
+    estatus = request.form.get("estatus", "pendiente").strip().lower()
+    comentarios = request.form.get("comentarios_adicionales", "").strip()
+    if not conflicto_hash:
+        return redirect(url_for("observaciones_home"))
+    db_manager.actualizar_estatus_observacion_cruce(
+        conflicto_hash,
+        estatus,
+        comentarios=comentarios,
+        usuario=session.get("usuario", ""),
+    )
+    destino = request.form.get("redirect_to", "observaciones").strip()
+    if destino == "cruces":
+        return redirect(url_for("cruce_entes"))
+    return redirect(url_for("observaciones_home"))
+
+
+@app.route("/pdp")
+def pagos_pdp_home():
+    filtros = {
+        "periodo_quincenal": _query_param("periodo_quincenal"),
+        "ente": _query_param("ente"),
+        "rfc": _query_param("rfc"),
+        "estatus": _query_param("estatus"),
+    }
+    return render_template("pdp.html", **_build_pdp_context(filtros))
+
+
+@app.route("/pdp/calcular", methods=["POST"])
+def calcular_pagos_pdp_route():
+    filtros = {
+        "periodo_quincenal": str(request.form.get("periodo_quincenal", "")).strip(),
+        "ente": str(request.form.get("ente", "")).strip(),
+        "rfc": str(request.form.get("rfc", "")).strip(),
+        "estatus": str(request.form.get("estatus", "")).strip(),
+    }
+    return render_template("pdp.html", **_build_pdp_context(filtros, recalcular=True))
+
+
+@app.route("/reportes-operativos")
+def reportes_operativos():
+    filtros = {
+        "periodo_quincenal": _query_param("periodo_quincenal"),
+        "ente": _query_param("ente"),
+        "rfc": _query_param("rfc"),
+        "severidad": _query_param("severidad"),
+        "estatus": _query_param("estatus"),
+        "estatus_pago": _query_param("estatus_pago"),
+    }
+    return render_template("reportes_operativos.html", **_build_reportes_context(filtros))
+
+
+@app.route("/reportes-operativos/exportar")
+def exportar_reportes_operativos():
+    tipo = _query_param("tipo", "cruces").lower()
+    filtros = {
+        "periodo_quincenal": _query_param("periodo_quincenal"),
+        "ente": _query_param("ente"),
+        "rfc": _query_param("rfc"),
+        "severidad": _query_param("severidad"),
+        "estatus": _query_param("estatus"),
+        "estatus_pago": _query_param("estatus_pago"),
+    }
+    context = _build_reportes_context(filtros)
+
+    if tipo == "cruces":
+        filas = [{
+            "RFC": item["rfc"],
+            "Nombre": item["nombre"],
+            "Ente A": item["ente_a_display"],
+            "Ente B": item["ente_b_display"],
+            "Día": item["dia_label"],
+            "Horario A": f"{item['hora_inicio_a']} - {item['hora_fin_a']}",
+            "Horario B": f"{item['hora_inicio_b']} - {item['hora_fin_b']}",
+            "Traslape Minutos": item["minutos_traslape"],
+            "Severidad": item["severidad"],
+            "Estatus": item["estatus_revision"],
+        } for item in context["cruces"]["conflictos"]]
+        nombre_archivo = "SASP_Reporte_Cruces_Horario.xlsx"
+        hoja = "Cruces_Horario"
+    elif tipo == "ente":
+        filas = [{
+            "Ente": item["ente_display"],
+            "Personas con cruce": item["personas"],
+            "Conflictos": item["conflictos"],
+            "Severidad máxima": item["severidad"],
+        } for item in context["por_ente"]]
+        nombre_archivo = "SASP_Reporte_por_Ente.xlsx"
+        hoja = "Cruces_por_Ente"
+    elif tipo == "persona":
+        filas = [{
+            "RFC": item["rfc"],
+            "Nombre": item["nombre"],
+            "Entes relacionados": ", ".join(item["entes"]),
+            "Horarios": item["numero_horarios"],
+            "Conflictos": item["numero_conflictos"],
+            "Severidad máxima": item["severidad_maxima"],
+            "Última revisión": item["ultima_revision"],
+            "Estatus": item["estatus_revision"],
+        } for item in context["cruces"]["personas"]]
+        nombre_archivo = "SASP_Reporte_por_Persona.xlsx"
+        hoja = "Cruces_por_Persona"
+    elif tipo == "severidad":
+        filas = [{
+            "Severidad": key.capitalize(),
+            "Conflictos": context["cruces"]["resumen"][key],
+        } for key in ("alta", "media", "baja")]
+        nombre_archivo = "SASP_Reporte_por_Severidad.xlsx"
+        hoja = "Cruces_por_Severidad"
+    elif tipo == "periodo":
+        filas = [{
+            "Periodo": context["pdp"]["periodo_actual"]["etiqueta"] if context["pdp"]["periodo_actual"] else "",
+            "RFC": item["rfc"],
+            "Nombre": item["nombre"],
+            "Ente": _ente_display(item["ente"]),
+            "Estatus": item["estatus"],
+            "Total calculado": item["total_calculado"],
+        } for item in context["pdp"]["pagos"]]
+        nombre_archivo = "SASP_Reporte_Quincenal.xlsx"
+        hoja = "Periodo_Quincenal"
+    elif tipo == "observaciones":
+        filas = [{
+            "RFC": item["rfc"],
+            "Nombre": item["nombre"],
+            "Entes": f"{_ente_display(item['ente_a'])} / {_ente_display(item['ente_b'])}",
+            "Severidad": item["severidad"],
+            "Estatus": item["estatus"],
+            "Observación": item["texto_observacion"],
+            "Recomendación": item["recomendacion"],
+            "Actualizado": item["actualizado"],
+        } for item in context["observaciones"]["observaciones"]]
+        nombre_archivo = "SASP_Reporte_Observaciones.xlsx"
+        hoja = "Observaciones"
+    else:
+        filas = [{
+            "RFC": item["rfc"],
+            "Nombre": item["nombre"],
+            "Ente": _ente_display(item["ente"]),
+            "Periodo": item["periodo_quincenal"],
+            "Sueldo base": item["sueldo_base"],
+            "Monto PDP": item["monto_pdp"],
+            "Total calculado": item["total_calculado"],
+            "Estatus": item["estatus"],
+            "Observaciones": item["observaciones"],
+        } for item in context["pdp"]["pagos"]]
+        nombre_archivo = "SASP_Reporte_Pagos_PDP.xlsx"
+        hoja = "Pagos_PDP"
+
+    df = pd.DataFrame(filas)
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=hoja)
+    output.seek(0)
+    return send_file(output, download_name=nombre_archivo, as_attachment=True)
 
 # -----------------------------------------------------------
 # RESULTADOS AGRUPADOS
@@ -941,6 +2582,7 @@ def reporte_por_ente():
         {"m": "Entes con duplicidad", "v": str(entes_con_duplicidad)},
         {"m": "Índice de trabajadores duplicados", "v": f"{indice_duplicidad:.2f}%"},
     ]
+    resultados_monitor = _build_resultados_monitor()
 
     return render_template(
         "resultados.html",
@@ -965,6 +2607,7 @@ def reporte_por_ente():
             "trabajadores_procesados": trabajadores_procesados,
             "duplicados_detectados": duplicados_detectados,
         },
+        resultados_monitor=resultados_monitor,
     )
 
 # -----------------------------------------------------------
@@ -1508,7 +3151,31 @@ def inject_helpers():
 @app.route('/descargar-plantilla')
 def descargar_plantilla():
     ruta = os.path.join(app.root_path, 'static')
-    return send_from_directory(ruta, 'Plantilla.xlsx', as_attachment=True)
+    return send_from_directory(ruta, 'Plantilla_Quincenas.xlsx', as_attachment=True)
+
+
+@app.route("/descargar-plantilla-horarios")
+def descargar_plantilla_horarios():
+    df = pd.DataFrame([{
+        "RFC": "ABCD900101XXX",
+        "Nombre": "NOMBRE DE PRUEBA",
+        "Ente": "SEPE",
+        "Cargo": "DOCENTE",
+        "Dia": "Lunes",
+        "Hora_inicio": "08:00",
+        "Hora_fin": "12:00",
+        "Fecha_inicio_vigencia": date.today().isoformat(),
+        "Fecha_fin_vigencia": "",
+        "Periodo": "2026-A",
+        "Observaciones": "",
+        "Estatus": "activo",
+    }])
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Horarios")
+    output.seek(0)
+    return send_file(output, download_name="Plantilla_Horarios.xlsx", as_attachment=True)
 
 # -----------------------------------------------------------
 # MAIN

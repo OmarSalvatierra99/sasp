@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %}Horarios - SASP{% endblock %}
+{% block content %}
+<section class="module-shell">
+  <header class="module-header">
+    <div>
+      <p class="module-kicker">Módulo operativo</p>
+      <h2>Horarios</h2>
+      <p>Registra, consulta y depura horarios por persona, ente, vigencia y estatus para alimentar la revisión de cruces.</p>
+    </div>
+    <div class="module-meta-grid">
+      <article><span>Horarios</span><strong>{{ horarios_stats.total }}</strong></article>
+      <article><span>Activos</span><strong>{{ horarios_stats.activos }}</strong></article>
+      <article><span>Personas</span><strong>{{ horarios_stats.personas }}</strong></article>
+      <article><span>Entes</span><strong>{{ horarios_stats.entes }}</strong></article>
+    </div>
+  </header>
+
+  <section class="workspace-grid workspace-grid-wide">
+    <article class="workspace-card">
+      <div class="section-heading">
+        <div>
+          <h3>{{ "Editar horario" if edit_horario else "Registrar horario" }}</h3>
+          <p>Captura el horario institucional con vigencia, ente y estatus operativo.</p>
+        </div>
+      </div>
+
+      {% if form_error %}
+      <div class="status status-error">{{ form_error }}</div>
+      {% endif %}
+
+      <form method="post" action="{{ url_for('guardar_horario_persona') }}" class="dense-form">
+        <input type="hidden" name="id" value="{{ edit_horario.id if edit_horario else '' }}">
+        <div class="form-grid">
+          <label>
+            <span>RFC</span>
+            <input type="text" name="rfc" value="{{ (edit_horario.rfc if edit_horario else filtros.rfc) or '' }}" required>
+          </label>
+          <label>
+            <span>Nombre</span>
+            <input type="text" name="nombre" value="{{ edit_horario.nombre if edit_horario else '' }}" placeholder="Se completa si existe en la base">
+          </label>
+          <label>
+            <span>Ente</span>
+            <select name="ente" required>
+              <option value="">Seleccione</option>
+              {% for item in catalogo_visible %}
+              {% set clave = item.clave %}
+              <option value="{{ clave }}" {% if (edit_horario and edit_horario.ente == clave) or filtros.ente == clave %}selected{% endif %}>{{ item.siglas or item.nombre }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Cargo o servicio</span>
+            <input type="text" name="cargo" value="{{ edit_horario.cargo if edit_horario else '' }}">
+          </label>
+          <label>
+            <span>Día</span>
+            <select name="dia_semana" required>
+              <option value="">Seleccione</option>
+              {% for day_number, day_label in week_days %}
+              <option value="{{ day_number }}" {% if edit_horario and edit_horario.dia_semana == day_number %}selected{% endif %}>{{ day_label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Hora inicio</span>
+            <input type="time" name="hora_inicio" value="{{ edit_horario.hora_inicio if edit_horario else '' }}" required>
+          </label>
+          <label>
+            <span>Hora fin</span>
+            <input type="time" name="hora_fin" value="{{ edit_horario.hora_fin if edit_horario else '' }}" required>
+          </label>
+          <label>
+            <span>Inicio de vigencia</span>
+            <input type="date" name="fecha_inicio_vigencia" value="{{ edit_horario.fecha_inicio_vigencia if edit_horario else '' }}" required>
+          </label>
+          <label>
+            <span>Fin de vigencia</span>
+            <input type="date" name="fecha_fin_vigencia" value="{{ edit_horario.fecha_fin_vigencia if edit_horario else '' }}">
+          </label>
+          <label>
+            <span>Periodo o ciclo</span>
+            <input type="text" name="periodo" value="{{ edit_horario.periodo if edit_horario else '' }}" placeholder="2026-A, QNA-01, semestre">
+          </label>
+          <label>
+            <span>Estatus</span>
+            <select name="estatus">
+              {% for estatus in ['activo', 'inactivo', 'pendiente', 'observado'] %}
+              <option value="{{ estatus }}" {% if (edit_horario and edit_horario.estatus == estatus) or (not edit_horario and estatus == 'activo') %}selected{% endif %}>{{ estatus|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label class="checkbox-inline">
+            <input type="checkbox" name="permite_traslape_interno" value="1" {% if edit_horario and edit_horario.permite_traslape_interno %}checked{% endif %}>
+            <span>Permite traslape interno en el mismo ente</span>
+          </label>
+          <label class="field-span-full">
+            <span>Observaciones</span>
+            <textarea name="observaciones" rows="3">{{ edit_horario.observaciones if edit_horario else '' }}</textarea>
+          </label>
+        </div>
+        <div class="action-row">
+          <button type="submit" class="btn btn-primary">{{ "Guardar cambios" if edit_horario else "Registrar horario" }}</button>
+          <a href="{{ url_for('horarios_home') }}" class="btn btn-secondary">Limpiar</a>
+          <a href="{{ url_for('cruce_entes', rfc=(edit_horario.rfc if edit_horario else filtros.rfc)) }}" class="btn btn-secondary">Ver cruces</a>
+        </div>
+      </form>
+    </article>
+
+    <aside class="workspace-stack">
+      <article class="workspace-card compact-card">
+        <div class="section-heading">
+          <div>
+            <h3>Filtros</h3>
+            <p>Encuentra horarios por persona, ente, vigencia o estatus.</p>
+          </div>
+        </div>
+        <form method="get" class="dense-form">
+          <div class="form-grid form-grid-compact">
+            <label><span>RFC</span><input type="text" name="rfc" value="{{ filtros.rfc or '' }}"></label>
+            <label><span>Nombre</span><input type="text" name="nombre" value="{{ filtros.nombre or '' }}"></label>
+            <label>
+              <span>Ente</span>
+              <select name="ente">
+                <option value="">Todos</option>
+                {% for item in catalogo_visible %}
+                <option value="{{ item.clave }}" {% if filtros.ente == item.clave %}selected{% endif %}>{{ item.siglas or item.nombre }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              <span>Día</span>
+              <select name="dia_semana">
+                <option value="">Todos</option>
+                {% for day_number, day_label in week_days %}
+                <option value="{{ day_number }}" {% if filtros.dia_semana|string == day_number|string %}selected{% endif %}>{{ day_label }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label>
+              <span>Estatus</span>
+              <select name="estatus">
+                <option value="">Todos</option>
+                {% for estatus in ['activo', 'inactivo', 'pendiente', 'observado'] %}
+                <option value="{{ estatus }}" {% if filtros.estatus == estatus %}selected{% endif %}>{{ estatus|capitalize }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <label><span>Desde</span><input type="date" name="fecha_desde" value="{{ filtros.fecha_desde or '' }}"></label>
+            <label><span>Hasta</span><input type="date" name="fecha_hasta" value="{{ filtros.fecha_hasta or '' }}"></label>
+          </div>
+          <div class="action-row">
+            <button type="submit" class="btn btn-primary">Aplicar filtros</button>
+            <a href="{{ url_for('horarios_home') }}" class="btn btn-secondary">Restablecer</a>
+          </div>
+        </form>
+      </article>
+
+      {% if persona_detalle %}
+      <article class="workspace-card compact-card">
+        <div class="section-heading">
+          <div>
+            <h3>Detalle de persona</h3>
+            <p>{{ persona_detalle.nombre or 'Sin nombre visible' }} · {{ persona_detalle.rfc }}</p>
+          </div>
+        </div>
+        <ul class="compact-list">
+          {% for item in persona_detalle.horarios %}
+          <li>{{ _ente_display(item.ente) }} · {{ week_days[item.dia_semana][1] }} · {{ item.hora_inicio }} - {{ item.hora_fin }}</li>
+          {% else %}
+          <li>Sin horarios registrados para este RFC.</li>
+          {% endfor %}
+        </ul>
+      </article>
+      {% endif %}
+
+      {% if ente_detalle %}
+      <article class="workspace-card compact-card">
+        <div class="section-heading">
+          <div>
+            <h3>Detalle de ente</h3>
+            <p>{{ ente_detalle.ente_display }}</p>
+          </div>
+        </div>
+        <p class="metric-caption">{{ ente_detalle.horarios|length }} horarios relacionados.</p>
+      </article>
+      {% endif %}
+    </aside>
+  </section>
+
+  <article class="workspace-card">
+    <div class="section-heading">
+      <div>
+        <h3>Horarios registrados</h3>
+        <p>Listado operativo para revisión, edición y depuración institucional.</p>
+      </div>
+    </div>
+
+    {% if horarios %}
+    <div class="table-wrap">
+      <table class="tabla-resultados table-soft">
+        <thead>
+          <tr>
+            <th>Persona</th>
+            <th>Ente</th>
+            <th>Día</th>
+            <th>Horario</th>
+            <th>Vigencia</th>
+            <th>Estatus</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in horarios %}
+          <tr>
+            <td>
+              <strong>{{ item.nombre }}</strong><br>
+              <small>{{ item.rfc }}</small>
+            </td>
+            <td>{{ _ente_display(item.ente) }}</td>
+            <td>{{ week_days[item.dia_semana][1] }}</td>
+            <td>{{ item.hora_inicio }} - {{ item.hora_fin }}</td>
+            <td>{{ item.fecha_inicio_vigencia }}{% if item.fecha_fin_vigencia %} a {{ item.fecha_fin_vigencia }}{% else %} abierta{% endif %}</td>
+            <td><span class="state-pill state-{{ item.estatus }}">{{ item.estatus|capitalize }}</span></td>
+            <td>
+              <div class="table-actions">
+                <a href="{{ url_for('horarios_home', edit_id=item.id, rfc=item.rfc) }}" class="btn btn-secondary btn-sm">Editar</a>
+                <form method="post" action="{{ url_for('desactivar_horario_persona', horario_id=item.id) }}">
+                  <button type="submit" class="btn btn-secondary btn-sm">Desactivar</button>
+                </form>
+                <form method="post" action="{{ url_for('eliminar_horario_persona', horario_id=item.id) }}" onsubmit="return confirm('¿Eliminar horario?');">
+                  <button type="submit" class="btn btn-secondary btn-sm">Eliminar</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty-inline">No hay horarios registrados con los filtros actuales.</div>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}

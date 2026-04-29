@@ -12,106 +12,490 @@ document.addEventListener("DOMContentLoaded", () => {
   if (form) {
     const input = document.getElementById("fileInput");
     const uploadArea = document.getElementById("uploadArea");
+    const selectedFilesList = document.getElementById("selectedFilesList");
+    const selectedFilesEmpty = document.getElementById("selectedFilesEmpty");
     const uploadStatus = document.getElementById("uploadStatus");
     const uploadResult = document.getElementById("uploadResult");
+    const resultStatusTitle = document.getElementById("resultStatusTitle");
     const resultMessage = document.getElementById("resultMessage");
+    const processUploadBtn = document.getElementById("processUploadBtn");
+    const replaceQuincenasBtn = document.getElementById("replaceQuincenasBtn");
+    const quincenasProgressLabel = document.getElementById("quincenasProgressLabel");
+    const quincenasProgressText = document.getElementById("quincenasProgressText");
+    const quincenasProgressPercent = document.getElementById("quincenasProgressPercent");
+    const quincenasProgressBar = document.getElementById("quincenasProgressBar");
 
-    uploadArea.addEventListener("click", () => input.click());
-    uploadArea.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      uploadArea.classList.add("dragging");
-    });
-    uploadArea.addEventListener("dragleave", () => {
-      uploadArea.classList.remove("dragging");
-    });
-    uploadArea.addEventListener("drop", (e) => {
-      e.preventDefault();
-      input.files = e.dataTransfer.files;
-      handleUpload(input.files);
-    });
-    input.addEventListener("change", () => handleUpload(input.files));
+    const horariosForm = document.getElementById("uploadHorariosForm");
+    const horariosInput = document.getElementById("horariosFileInput");
+    const uploadHorariosArea = document.getElementById("uploadHorariosArea");
+    const horariosFilesList = document.getElementById("horariosFilesList");
+    const horariosFilesEmpty = document.getElementById("horariosFilesEmpty");
+    const uploadHorariosStatus = document.getElementById("uploadHorariosStatus");
+    const uploadHorariosResult = document.getElementById("uploadHorariosResult");
+    const horariosResultTitle = document.getElementById("horariosResultTitle");
+    const horariosResultMessage = document.getElementById("horariosResultMessage");
+    const processHorariosUploadBtn = document.getElementById("processHorariosUploadBtn");
+    const replaceHorariosBtn = document.getElementById("replaceHorariosBtn");
+    const horariosProgressLabel = document.getElementById("horariosProgressLabel");
+    const horariosProgressText = document.getElementById("horariosProgressText");
+    const horariosProgressPercent = document.getElementById("horariosProgressPercent");
+    const horariosProgressBar = document.getElementById("horariosProgressBar");
 
-    async function handleUpload(files) {
-      if (!files.length)
-        return showMessage("Selecciona al menos un archivo Excel válido (.xlsx o .xls)", true);
+    const drawerNode = document.getElementById("dashboardProcessedDrawerData");
+    const processedDrawerToggle = document.getElementById("processedDrawerToggle");
+    const processedDrawerOverlay = document.getElementById("processedDrawerOverlay");
+    const processedDrawer = document.getElementById("processedDrawer");
+    const processedDrawerClose = document.getElementById("processedDrawerClose");
+    const processedDrawerCount = document.getElementById("processedDrawerCount");
+    const processedDrawerMeta = document.getElementById("processedDrawerMeta");
+    const processedTableBody = document.getElementById("processedTableBody");
+    const processedEmpty = document.getElementById("processedEmpty");
+    const processedFilterButtons = Array.from(document.querySelectorAll("[data-processed-filter]"));
 
-      const formData = new FormData();
-      for (const file of files) {
-        if (!/\.(xlsx|xls)$/i.test(file.name))
-          return showMessage(`Archivo no válido: ${file.name}`, true);
-        formData.append("files", file);
+    let selectedFiles = [];
+    let selectedHorariosFiles = [];
+    let isProcessingUpload = false;
+    let isProcessingHorariosUpload = false;
+    let activeProcessedFilter = "trabajadores";
+    let processedSections = parseDrawerData(drawerNode);
+    const fileStates = new Map();
+    const horarioFileStates = new Map();
+
+    const STATUS_META = {
+      ready: { label: "Listo", tone: "success" },
+      invalid: { label: "Inválido", tone: "error" },
+      processing: { label: "Procesando", tone: "info" },
+      uploaded: { label: "Cargado", tone: "success" },
+      warning: { label: "Con alertas", tone: "warning" },
+      failed: { label: "Error", tone: "error" },
+    };
+
+    const UPLOAD_STEPS = {
+      quincenas: [
+        { progress: 18, label: "Subiendo archivo", text: "Transferencia en curso." },
+        { progress: 52, label: "Validando datos", text: "Revisando estructura y contenido." },
+        { progress: 84, label: "Procesando quincena", text: "Actualizando registros operativos." },
+      ],
+      horarios: [
+        { progress: 18, label: "Subiendo archivo", text: "Transferencia en curso." },
+        { progress: 52, label: "Validando datos", text: "Revisando formato y vigencias." },
+        { progress: 84, label: "Procesando horarios", text: "Guardando horarios en la base." },
+      ],
+    };
+
+    function parseDrawerData(node) {
+      if (!node) {
+        return { trabajadores: [], horarios: [] };
+      }
+      try {
+        const data = JSON.parse(node.textContent || "{}");
+        return {
+          trabajadores: Array.isArray(data.trabajadores) ? data.trabajadores : [],
+          horarios: Array.isArray(data.horarios) ? data.horarios : [],
+        };
+      } catch (_error) {
+        return { trabajadores: [], horarios: [] };
+      }
+    }
+
+    function getFileKey(file) {
+      return [file.name, file.size, file.lastModified].join("::");
+    }
+
+    function isExcelFile(file) {
+      return /\.(xlsx|xls)$/i.test(file.name || "");
+    }
+
+    function formatFileSize(bytes) {
+      const size = Number(bytes || 0);
+      if (!size) return "0 KB";
+      if (size < 1024) return `${size} B`;
+      if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+      return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+    }
+
+    function syncInputFiles(files, targetInput) {
+      const dataTransfer = new DataTransfer();
+      files.forEach((file) => dataTransfer.items.add(file));
+      targetInput.files = dataTransfer.files;
+    }
+
+    function bindDropzone(zone, targetInput, handler) {
+      if (!zone || !targetInput) return;
+      zone.addEventListener("click", () => targetInput.click());
+      zone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          targetInput.click();
+        }
+      });
+      zone.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        zone.classList.add("dragging");
+      });
+      zone.addEventListener("dragleave", () => {
+        zone.classList.remove("dragging");
+      });
+      zone.addEventListener("drop", (event) => {
+        event.preventDefault();
+        zone.classList.remove("dragging");
+        handler(Array.from(event.dataTransfer.files || []));
+      });
+    }
+
+    function mergeSelectedFiles(newFiles, target, stateMap, renderFn, onlyOne = false) {
+      if (!newFiles.length) return target;
+      const files = onlyOne ? [newFiles[newFiles.length - 1]] : [...target];
+      const existingKeys = new Set(files.map((file) => getFileKey(file)));
+      newFiles.forEach((file) => {
+        const fileKey = getFileKey(file);
+        if (onlyOne) {
+          files.length = 0;
+          stateMap.clear();
+        }
+        if (existingKeys.has(fileKey) && !onlyOne) return;
+        existingKeys.add(fileKey);
+        files.push(file);
+        stateMap.set(fileKey, isExcelFile(file) ? "ready" : "invalid");
+      });
+      renderFn(files);
+      return files;
+    }
+
+    function renderFileList(listNode, emptyNode, files, stateMap, removeAttr, processBtn, isBusy) {
+      if (!listNode || !emptyNode) return;
+      if (!files.length) {
+        listNode.hidden = true;
+        listNode.innerHTML = "";
+        emptyNode.hidden = false;
+        if (processBtn) processBtn.disabled = true;
+        return;
       }
 
-      uploadStatus.hidden = false;
-      uploadArea.style.display = "none";
-      uploadResult.hidden = true;
+      emptyNode.hidden = true;
+      listNode.hidden = false;
+      listNode.innerHTML = files.map((file) => {
+        const statusMeta = STATUS_META[stateMap.get(getFileKey(file)) || "ready"] || STATUS_META.ready;
+        return `
+          <li class="upload-file-item">
+            <div class="upload-file-copy">
+              <strong>${escapeHtml(file.name)}</strong>
+              <span>${formatFileSize(file.size)} · ${escapeHtml((file.name.split(".").pop() || "").toUpperCase())}</span>
+            </div>
+            <div class="upload-file-actions">
+              <span class="file-status-badge tone-${statusMeta.tone}">${statusMeta.label}</span>
+              <button type="button" class="file-remove-button" ${removeAttr}="${escapeHtml(getFileKey(file))}" aria-label="Quitar ${escapeHtml(file.name)}">Quitar</button>
+            </div>
+          </li>
+        `;
+      }).join("");
+
+      if (processBtn) {
+        processBtn.disabled = isBusy || !files.some((file) => isExcelFile(file));
+      }
+    }
+
+    function setProgressState(labelNode, textNode, percentNode, barNode, statusNode, label, text, progress) {
+      if (statusNode) statusNode.hidden = false;
+      if (labelNode) labelNode.textContent = label;
+      if (textNode) textNode.textContent = text;
+      if (percentNode) percentNode.textContent = `${progress}%`;
+      if (barNode) barNode.style.width = `${progress}%`;
+    }
+
+    function setProcessedDrawerOpen(isOpen) {
+      if (!processedDrawer || !processedDrawerOverlay || !processedDrawerToggle) return;
+      processedDrawer.classList.toggle("is-open", isOpen);
+      processedDrawerOverlay.classList.toggle("is-visible", isOpen);
+      processedDrawer.setAttribute("aria-hidden", isOpen ? "false" : "true");
+      processedDrawerToggle.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    }
+
+    function renderProcessedFiles() {
+      if (!processedTableBody || !processedEmpty) return;
+      const currentItems = Array.isArray(processedSections[activeProcessedFilter]) ? processedSections[activeProcessedFilter] : [];
+      const totalItems = (processedSections.trabajadores || []).length + (processedSections.horarios || []).length;
+
+      if (processedDrawerCount) processedDrawerCount.textContent = String(totalItems);
+      if (processedDrawerMeta) {
+        processedDrawerMeta.textContent = activeProcessedFilter === "horarios"
+          ? "Archivos procesados de horarios"
+          : "Archivos procesados de trabajadores";
+      }
+
+      processedFilterButtons.forEach((button) => {
+        button.classList.toggle("is-active", button.dataset.processedFilter === activeProcessedFilter);
+      });
+
+      if (!currentItems.length) {
+        processedTableBody.innerHTML = "";
+        processedEmpty.style.display = "block";
+        return;
+      }
+
+      processedEmpty.style.display = "none";
+      processedTableBody.innerHTML = currentItems.map((item) => `
+        <article class="processed-item">
+          <div class="processed-item-copy">
+            <strong>${escapeHtml(item.label || "Archivo sin nombre")}</strong>
+            <span>${escapeHtml(item.secondary || item.tipo || "")}</span>
+          </div>
+          <div class="processed-item-meta">
+            <small>${escapeHtml(item.fecha || "Sin fecha")}</small>
+            ${item.href ? `<a href="${escapeHtml(item.href)}" class="processed-link">${escapeHtml(item.cta || "Abrir")}</a>` : ""}
+          </div>
+        </article>
+      `).join("");
+    }
+
+    async function refreshProcessedFiles() {
+      try {
+        const response = await fetch("/api/dashboard/archivos-procesados", {
+          credentials: "same-origin",
+          headers: { "X-Requested-With": "XMLHttpRequest" },
+        });
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          throw new Error((data && data.error) || `Error ${response.status}`);
+        }
+        processedSections = {
+          trabajadores: Array.isArray(data.secciones?.trabajadores) ? data.secciones.trabajadores : [],
+          horarios: Array.isArray(data.secciones?.horarios) ? data.secciones.horarios : [],
+        };
+        renderProcessedFiles();
+      } catch (error) {
+        showMessage(`No fue posible actualizar archivos procesados: ${error.message}`, true);
+      }
+    }
+
+    async function processFiles({ files, action, stateMap, renderFn, progressNodes, resultNodes, areaNode, kind }) {
+      const validFiles = files.filter((file) => isExcelFile(file));
+      if (!validFiles.length) {
+        showMessage("Selecciona un archivo Excel válido para procesar.", true);
+        return;
+      }
+
+      const formData = new FormData();
+      validFiles.forEach((file) => {
+        formData.append("files", file);
+        stateMap.set(getFileKey(file), "processing");
+      });
+      renderFn(files);
+
+      const steps = UPLOAD_STEPS[kind];
+      const [labelNode, textNode, percentNode, barNode, statusNode] = progressNodes;
+      const [resultWrap, resultTitleNode, resultMessageNode] = resultNodes;
+
+      if (resultWrap) resultWrap.hidden = true;
+      if (areaNode) areaNode.classList.add("is-processing");
+      setProgressState(labelNode, textNode, percentNode, barNode, statusNode, steps[0].label, steps[0].text, steps[0].progress);
+
+      const timeouts = [
+        window.setTimeout(() => setProgressState(labelNode, textNode, percentNode, barNode, statusNode, steps[1].label, steps[1].text, steps[1].progress), 220),
+        window.setTimeout(() => setProgressState(labelNode, textNode, percentNode, barNode, statusNode, steps[2].label, steps[2].text, steps[2].progress), 650),
+      ];
 
       try {
-        const res = await fetch(form.action, {
+        const response = await fetch(action, {
           method: "POST",
           body: formData,
           credentials: "same-origin",
-          headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-          }
+          headers: { "X-Requested-With": "XMLHttpRequest" },
         });
-
-        uploadStatus.hidden = true;
-        uploadArea.style.display = "block";
-
-        const contentType = res.headers.get("content-type");
-        let data = null;
-        if (contentType && contentType.includes("application/json")) {
-          data = await res.json();
+        const data = await response.json();
+        if (!response.ok || data.error) {
+          throw new Error((data && data.error) || `Error ${response.status}`);
         }
 
-        if (!res.ok) {
-          if (data && data.error) throw new Error(data.error);
-          if (res.status === 401 || res.status === 403) {
-            throw new Error("Sesión expirada o no autorizada. Por favor, inicia sesión nuevamente.");
-          }
-          if (res.status === 413) {
-            throw new Error("Los archivos exceden el tamaño máximo permitido.");
-          }
-          throw new Error(`Error del servidor (${res.status})`);
+        validFiles.forEach((file) => {
+          stateMap.set(getFileKey(file), data.alertas && data.alertas.length ? "warning" : "uploaded");
+        });
+        renderFn(files);
+        setProgressState(labelNode, textNode, percentNode, barNode, statusNode, "Completado", data.mensaje || "Archivo procesado.", 100);
+        if (resultTitleNode) {
+          resultTitleNode.textContent = data.alertas && data.alertas.length ? "Procesado con alertas" : "Procesado correctamente";
         }
-
-        if (data && data.error) throw new Error(data.error);
-        if (!data) throw new Error("Respuesta inválida del servidor.");
-
-        // Mostrar alertas si existen
-        let alertasHTML = '';
-        if (data.alertas && data.alertas.length > 0) {
-          alertasHTML = '<div style="background: #fef3c7; border-left: 4px solid #f59e0b; padding: 1rem; margin-top: 1rem; border-radius: 6px;">';
-          alertasHTML += '<strong style="color: #92400e;">⚠️ Advertencias:</strong><ul style="margin: 0.5rem 0 0 1.2rem; color: #92400e;">';
-          data.alertas.forEach(alerta => {
-            alertasHTML += `<li>${alerta.mensaje}</li>`;
-          });
-          alertasHTML += '</ul></div>';
+        if (resultMessageNode) {
+          const detail = kind === "quincenas"
+            ? `${Number(data.total_procesados || 0)} registros procesados`
+            : `${Number(data.guardados_total || 0)} horarios guardados`;
+          resultMessageNode.textContent = `${data.mensaje || "Carga completada."} ${detail}.`;
         }
-
-        uploadResult.hidden = false;
-        resultMessage.innerHTML = `
-          <strong>${data.mensaje || "Procesamiento completado"}</strong><br>
-          <span>${data.total_procesados || data.total_resultados || 0} registros procesados.</span><br>
-          <span>${data.insertados || data.nuevos || 0} nuevos registros guardados.</span><br>
-          <span>${data.actualizados || 0} registros actualizados.</span>
-          ${alertasHTML}
-        `;
-      } catch (err) {
-        uploadStatus.hidden = true;
-        uploadArea.style.display = "block";
-        showMessage("❌ Error al procesar los archivos: " + err.message, true);
+        if (resultWrap) resultWrap.hidden = false;
+        refreshProcessedFiles();
+        showMessage(data.mensaje || "Carga completada.", false);
+      } catch (error) {
+        validFiles.forEach((file) => {
+          stateMap.set(getFileKey(file), "failed");
+        });
+        renderFn(files);
+        setProgressState(labelNode, textNode, percentNode, barNode, statusNode, "Error", error.message, 100);
+        if (resultTitleNode) resultTitleNode.textContent = "No se pudo procesar";
+        if (resultMessageNode) resultMessageNode.textContent = error.message;
+        if (resultWrap) resultWrap.hidden = false;
+        showMessage(`Error al procesar archivo: ${error.message}`, true);
+      } finally {
+        timeouts.forEach((timeoutId) => window.clearTimeout(timeoutId));
+        if (areaNode) areaNode.classList.remove("is-processing");
       }
+    }
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
     }
 
     function showMessage(text, isError = false) {
       const msg = document.createElement("div");
       msg.className = `upload-message ${isError ? "error" : "success"}`;
-      msg.innerHTML = text;
+      msg.textContent = text;
       form.after(msg);
       setTimeout(() => msg.remove(), 5000);
     }
+
+    function renderQuincenas(files = selectedFiles) {
+      renderFileList(
+        selectedFilesList,
+        selectedFilesEmpty,
+        files,
+        fileStates,
+        "data-remove-file",
+        processUploadBtn,
+        isProcessingUpload
+      );
+    }
+
+    function renderHorarios(files = selectedHorariosFiles) {
+      renderFileList(
+        horariosFilesList,
+        horariosFilesEmpty,
+        files,
+        horarioFileStates,
+        "data-remove-horario-file",
+        processHorariosUploadBtn,
+        isProcessingHorariosUpload
+      );
+    }
+
+    bindDropzone(uploadArea, input, (files) => {
+      selectedFiles = mergeSelectedFiles(files, selectedFiles, fileStates, renderQuincenas);
+      syncInputFiles(selectedFiles, input);
+      uploadResult.hidden = true;
+    });
+    bindDropzone(uploadHorariosArea, horariosInput, (files) => {
+      selectedHorariosFiles = mergeSelectedFiles(files, selectedHorariosFiles, horarioFileStates, renderHorarios, true);
+      syncInputFiles(selectedHorariosFiles, horariosInput);
+      uploadHorariosResult.hidden = true;
+    });
+
+    input.addEventListener("change", () => {
+      selectedFiles = mergeSelectedFiles(Array.from(input.files || []), selectedFiles, fileStates, renderQuincenas);
+      syncInputFiles(selectedFiles, input);
+      input.value = "";
+      uploadResult.hidden = true;
+    });
+
+    if (horariosInput) {
+      horariosInput.addEventListener("change", () => {
+        selectedHorariosFiles = mergeSelectedFiles(Array.from(horariosInput.files || []), selectedHorariosFiles, horarioFileStates, renderHorarios, true);
+        syncInputFiles(selectedHorariosFiles, horariosInput);
+        horariosInput.value = "";
+        uploadHorariosResult.hidden = true;
+      });
+    }
+
+    if (replaceQuincenasBtn) {
+      replaceQuincenasBtn.addEventListener("click", () => input.click());
+    }
+    if (replaceHorariosBtn) {
+      replaceHorariosBtn.addEventListener("click", () => horariosInput.click());
+    }
+
+    if (selectedFilesList) {
+      selectedFilesList.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-remove-file]");
+        if (!button) return;
+        const key = button.getAttribute("data-remove-file");
+        selectedFiles = selectedFiles.filter((file) => getFileKey(file) !== key);
+        fileStates.delete(key);
+        syncInputFiles(selectedFiles, input);
+        renderQuincenas();
+      });
+    }
+
+    if (horariosFilesList) {
+      horariosFilesList.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-remove-horario-file]");
+        if (!button) return;
+        const key = button.getAttribute("data-remove-horario-file");
+        selectedHorariosFiles = selectedHorariosFiles.filter((file) => getFileKey(file) !== key);
+        horarioFileStates.delete(key);
+        syncInputFiles(selectedHorariosFiles, horariosInput);
+        renderHorarios();
+      });
+    }
+
+    if (processUploadBtn) {
+      processUploadBtn.addEventListener("click", async () => {
+        isProcessingUpload = true;
+        processUploadBtn.disabled = true;
+        await processFiles({
+          files: selectedFiles,
+          action: form.action,
+          stateMap: fileStates,
+          renderFn: renderQuincenas,
+          progressNodes: [quincenasProgressLabel, quincenasProgressText, quincenasProgressPercent, quincenasProgressBar, uploadStatus],
+          resultNodes: [uploadResult, resultStatusTitle, resultMessage],
+          areaNode: uploadArea,
+          kind: "quincenas",
+        });
+        isProcessingUpload = false;
+        renderQuincenas();
+      });
+    }
+
+    if (processHorariosUploadBtn) {
+      processHorariosUploadBtn.addEventListener("click", async () => {
+        isProcessingHorariosUpload = true;
+        processHorariosUploadBtn.disabled = true;
+        await processFiles({
+          files: selectedHorariosFiles,
+          action: horariosForm.action,
+          stateMap: horarioFileStates,
+          renderFn: renderHorarios,
+          progressNodes: [horariosProgressLabel, horariosProgressText, horariosProgressPercent, horariosProgressBar, uploadHorariosStatus],
+          resultNodes: [uploadHorariosResult, horariosResultTitle, horariosResultMessage],
+          areaNode: uploadHorariosArea,
+          kind: "horarios",
+        });
+        isProcessingHorariosUpload = false;
+        renderHorarios();
+      });
+    }
+
+    if (processedDrawerToggle) {
+      processedDrawerToggle.addEventListener("click", () => setProcessedDrawerOpen(true));
+    }
+    if (processedDrawerClose) {
+      processedDrawerClose.addEventListener("click", () => setProcessedDrawerOpen(false));
+    }
+    if (processedDrawerOverlay) {
+      processedDrawerOverlay.addEventListener("click", () => setProcessedDrawerOpen(false));
+    }
+    processedFilterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        activeProcessedFilter = button.dataset.processedFilter || "trabajadores";
+        renderProcessedFiles();
+      });
+    });
+
+    renderQuincenas();
+    renderHorarios();
+    renderProcessedFiles();
   }
 
   // ===========================================================

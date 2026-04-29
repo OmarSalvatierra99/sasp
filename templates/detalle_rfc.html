@@ -10,6 +10,8 @@
       <p class="subtitle">RFC: <strong>{{ rfc }}</strong></p>
     </div>
     <div class="detail-actions">
+      <a href="{{ url_for('horarios_home', rfc=rfc) }}" class="btn btn-secondary">Abrir Horarios</a>
+      <a href="{{ url_for('cruce_entes', rfc=rfc) }}" class="btn btn-secondary">Ver cruces</a>
       <a href="{{ url_for('reporte_por_ente') }}" class="btn btn-secondary">Regresar a resultados</a>
     </div>
   </header>

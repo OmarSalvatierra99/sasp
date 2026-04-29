@@ -11,7 +11,7 @@ import sys
 import threading
 import unicodedata
 from collections import defaultdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -241,6 +241,85 @@ class DatabaseManager:
                 actualizado_por TEXT,
                 UNIQUE(rfc, ente)
             );
+
+            CREATE TABLE IF NOT EXISTS horarios_persona (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rfc TEXT NOT NULL,
+                nombre TEXT NOT NULL,
+                ente TEXT NOT NULL,
+                cargo TEXT,
+                dia_semana INTEGER NOT NULL,
+                hora_inicio TEXT NOT NULL,
+                hora_fin TEXT NOT NULL,
+                fecha_inicio_vigencia TEXT NOT NULL,
+                fecha_fin_vigencia TEXT,
+                periodo TEXT,
+                observaciones TEXT,
+                estatus TEXT NOT NULL DEFAULT 'activo',
+                permite_traslape_interno INTEGER NOT NULL DEFAULT 0,
+                origen TEXT NOT NULL DEFAULT 'manual',
+                creado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                actualizado_por TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS observaciones_cruce (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conflicto_hash TEXT UNIQUE NOT NULL,
+                rfc TEXT NOT NULL,
+                nombre TEXT NOT NULL,
+                ente_a TEXT NOT NULL,
+                ente_b TEXT NOT NULL,
+                dia_semana INTEGER NOT NULL,
+                horario_a TEXT NOT NULL,
+                horario_b TEXT NOT NULL,
+                minutos_traslape INTEGER NOT NULL DEFAULT 0,
+                fecha_inicio_a TEXT,
+                fecha_fin_a TEXT,
+                fecha_inicio_b TEXT,
+                fecha_fin_b TEXT,
+                severidad TEXT NOT NULL,
+                texto_observacion TEXT NOT NULL,
+                recomendacion TEXT,
+                estatus TEXT NOT NULL DEFAULT 'pendiente',
+                creado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                creado_por TEXT,
+                comentarios_adicionales TEXT,
+                referencia_documental TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS periodos_quincenales (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                etiqueta TEXT UNIQUE NOT NULL,
+                ejercicio INTEGER NOT NULL,
+                quincena INTEGER NOT NULL,
+                fecha_inicio TEXT NOT NULL,
+                fecha_fin TEXT NOT NULL,
+                activo INTEGER NOT NULL DEFAULT 1,
+                creado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS pagos_pdp (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rfc TEXT NOT NULL,
+                nombre TEXT NOT NULL,
+                ente TEXT NOT NULL,
+                periodo_quincenal TEXT NOT NULL,
+                fecha_inicio_periodo TEXT NOT NULL,
+                fecha_fin_periodo TEXT NOT NULL,
+                sueldo_base REAL NOT NULL DEFAULT 0,
+                monto_pdp REAL NOT NULL DEFAULT 0,
+                deducciones REAL NOT NULL DEFAULT 0,
+                percepciones_adicionales REAL NOT NULL DEFAULT 0,
+                total_calculado REAL NOT NULL DEFAULT 0,
+                estatus TEXT NOT NULL DEFAULT 'calculado',
+                observaciones TEXT,
+                conflicto_hash TEXT,
+                actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                actualizado_por TEXT,
+                UNIQUE(rfc, ente, periodo_quincenal)
+            );
         """)
         conn.commit()
 
@@ -249,8 +328,10 @@ class DatabaseManager:
         self._migrate_workflow_defaults(cur)
         self._migrate_entes_siglas(cur)
         self._migrate_catalogos_mayusculas(cur)
+        self._migrate_horarios_persona(cur)
         self._sync_catalog_users(cur)
         self._create_indexes(cur)
+        self._seed_periodos_quincenales(cur)
         self._invalidate_catalog_cache()
 
         conn.commit()
@@ -285,6 +366,22 @@ class DatabaseManager:
                 ON observaciones_beta(rfc);
             CREATE INDEX IF NOT EXISTS idx_observaciones_beta_rfc_ente
                 ON observaciones_beta(rfc, ente);
+            CREATE INDEX IF NOT EXISTS idx_horarios_persona_rfc
+                ON horarios_persona(rfc);
+            CREATE INDEX IF NOT EXISTS idx_horarios_persona_ente
+                ON horarios_persona(ente);
+            CREATE INDEX IF NOT EXISTS idx_horarios_persona_rfc_dia
+                ON horarios_persona(rfc, dia_semana, estatus);
+            CREATE INDEX IF NOT EXISTS idx_observaciones_cruce_rfc
+                ON observaciones_cruce(rfc);
+            CREATE INDEX IF NOT EXISTS idx_observaciones_cruce_estatus
+                ON observaciones_cruce(estatus, severidad);
+            CREATE INDEX IF NOT EXISTS idx_periodos_quincenales_ejercicio
+                ON periodos_quincenales(ejercicio, quincena);
+            CREATE INDEX IF NOT EXISTS idx_pagos_pdp_periodo
+                ON pagos_pdp(periodo_quincenal, estatus);
+            CREATE INDEX IF NOT EXISTS idx_pagos_pdp_rfc
+                ON pagos_pdp(rfc, ente);
         """)
 
     def _invalidate_catalog_cache(self):
@@ -416,6 +513,47 @@ class DatabaseManager:
                     """,
                     updates
                 )
+
+    def _migrate_horarios_persona(self, cur):
+        """Asegura columnas auxiliares en horarios_persona para instalaciones existentes."""
+        cur.execute("PRAGMA table_info(horarios_persona)")
+        columns = [row[1] for row in cur.fetchall()]
+        expected_columns = {
+            "permite_traslape_interno": "INTEGER NOT NULL DEFAULT 0",
+            "origen": "TEXT NOT NULL DEFAULT 'manual'",
+            "actualizado": "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+            "actualizado_por": "TEXT",
+        }
+        for column_name, definition in expected_columns.items():
+            if column_name not in columns:
+                cur.execute(f"ALTER TABLE horarios_persona ADD COLUMN {column_name} {definition}")
+
+    def _seed_periodos_quincenales(self, cur, ejercicio=None):
+        ejercicio = int(ejercicio or datetime.now().year)
+        cur.execute("SELECT COUNT(*) FROM periodos_quincenales WHERE ejercicio=?", (ejercicio,))
+        if cur.fetchone()[0] > 0:
+            return
+
+        seed_rows = []
+        for quincena in range(1, 25):
+            month = ((quincena - 1) // 2) + 1
+            if quincena % 2 == 1:
+                fecha_inicio = date(ejercicio, month, 1)
+                fecha_fin = date(ejercicio, month, 15)
+            else:
+                fecha_inicio = date(ejercicio, month, 16)
+                if month == 12:
+                    fecha_fin = date(ejercicio, month, 31)
+                else:
+                    fecha_fin = date(ejercicio, month + 1, 1) - timedelta(days=1)
+            etiqueta = f"{ejercicio}-QNA{quincena}"
+            seed_rows.append((etiqueta, ejercicio, quincena, fecha_inicio.isoformat(), fecha_fin.isoformat(), 1))
+
+        cur.executemany("""
+            INSERT OR IGNORE INTO periodos_quincenales
+                (etiqueta, ejercicio, quincena, fecha_inicio, fecha_fin, activo)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, seed_rows)
 
     # -------------------------------------------------------
     # Poblar datos base
@@ -670,6 +808,362 @@ class DatabaseManager:
             }
             for row in rows
         }
+
+    # -------------------------------------------------------
+    # Horarios institucionales
+    # -------------------------------------------------------
+    def obtener_nombre_persona_por_rfc(self, rfc):
+        rfc_norm = str(rfc or "").strip().upper()
+        if not rfc_norm:
+            return ""
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT nombre
+            FROM registros_laborales
+            WHERE UPPER(rfc)=UPPER(?)
+            ORDER BY fecha_actualizacion DESC, fecha_carga DESC
+            LIMIT 1
+        """, (rfc_norm,))
+        row = cur.fetchone()
+        conn.close()
+        return str(row["nombre"] or "").strip() if row else ""
+
+    def guardar_horario_persona(self, horario, usuario=""):
+        rfc = str(horario.get("rfc") or "").strip().upper()
+        ente = self.normalizar_ente_clave(horario.get("ente")) or str(horario.get("ente") or "").strip()
+        nombre = str(horario.get("nombre") or self.obtener_nombre_persona_por_rfc(rfc) or "").strip()
+        cargo = str(horario.get("cargo") or "").strip()
+        periodo = str(horario.get("periodo") or "").strip()
+        observaciones = str(horario.get("observaciones") or "").strip()
+        estatus = str(horario.get("estatus") or "activo").strip().lower()
+        origen = str(horario.get("origen") or "manual").strip()
+        dia_semana = int(horario.get("dia_semana", -1))
+        hora_inicio = str(horario.get("hora_inicio") or "").strip()
+        hora_fin = str(horario.get("hora_fin") or "").strip()
+        fecha_inicio_vigencia = str(horario.get("fecha_inicio_vigencia") or "").strip()
+        fecha_fin_vigencia = str(horario.get("fecha_fin_vigencia") or "").strip()
+        permite_traslape_interno = 1 if horario.get("permite_traslape_interno") else 0
+
+        if not rfc or not nombre or not ente or dia_semana < 0 or dia_semana > 6:
+            raise ValueError("Horario incompleto o inválido.")
+        if not hora_inicio or not hora_fin or not fecha_inicio_vigencia:
+            raise ValueError("Debes indicar día, horas y vigencia inicial.")
+
+        conn = self._connect()
+        cur = conn.cursor()
+        if horario.get("id"):
+            cur.execute("""
+                UPDATE horarios_persona
+                SET nombre=?, ente=?, cargo=?, dia_semana=?, hora_inicio=?, hora_fin=?,
+                    fecha_inicio_vigencia=?, fecha_fin_vigencia=?, periodo=?, observaciones=?,
+                    estatus=?, permite_traslape_interno=?, origen=?, actualizado=CURRENT_TIMESTAMP,
+                    actualizado_por=?
+                WHERE id=?
+            """, (
+                nombre, ente, cargo, dia_semana, hora_inicio, hora_fin,
+                fecha_inicio_vigencia, fecha_fin_vigencia or None, periodo, observaciones,
+                estatus, permite_traslape_interno, origen, usuario, int(horario["id"]),
+            ))
+            horario_id = int(horario["id"])
+        else:
+            cur.execute("""
+                INSERT INTO horarios_persona
+                    (rfc, nombre, ente, cargo, dia_semana, hora_inicio, hora_fin,
+                     fecha_inicio_vigencia, fecha_fin_vigencia, periodo, observaciones,
+                     estatus, permite_traslape_interno, origen, actualizado_por)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                rfc, nombre, ente, cargo, dia_semana, hora_inicio, hora_fin,
+                fecha_inicio_vigencia, fecha_fin_vigencia or None, periodo, observaciones,
+                estatus, permite_traslape_interno, origen, usuario,
+            ))
+            horario_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return horario_id
+
+    def desactivar_horario_persona(self, horario_id, usuario=""):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE horarios_persona
+            SET estatus='inactivo', actualizado=CURRENT_TIMESTAMP, actualizado_por=?
+            WHERE id=?
+        """, (usuario, int(horario_id)))
+        filas = cur.rowcount
+        conn.commit()
+        conn.close()
+        return filas
+
+    def eliminar_horario_persona(self, horario_id):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM horarios_persona WHERE id=?", (int(horario_id),))
+        filas = cur.rowcount
+        conn.commit()
+        conn.close()
+        return filas
+
+    def obtener_horario_persona(self, horario_id):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM horarios_persona WHERE id=?", (int(horario_id),))
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def listar_horarios_persona(self, filtros=None):
+        filtros = filtros or {}
+        clauses = []
+        params = []
+
+        if filtros.get("rfc"):
+            clauses.append("UPPER(rfc)=UPPER(?)")
+            params.append(str(filtros["rfc"]).strip())
+        if filtros.get("ente"):
+            ente_clave = self.normalizar_ente_clave(filtros["ente"]) or str(filtros["ente"]).strip()
+            clauses.append("ente=?")
+            params.append(ente_clave)
+        if filtros.get("dia_semana") not in (None, ""):
+            clauses.append("dia_semana=?")
+            params.append(int(filtros["dia_semana"]))
+        if filtros.get("estatus"):
+            clauses.append("LOWER(estatus)=LOWER(?)")
+            params.append(str(filtros["estatus"]).strip())
+        if filtros.get("nombre"):
+            clauses.append("nombre LIKE ?")
+            params.append(f"%{str(filtros['nombre']).strip()}%")
+        if filtros.get("fecha_desde"):
+            clauses.append("date(fecha_inicio_vigencia) >= date(?)")
+            params.append(str(filtros["fecha_desde"]).strip())
+        if filtros.get("fecha_hasta"):
+            clauses.append("(fecha_fin_vigencia IS NULL OR date(fecha_fin_vigencia) <= date(?))")
+            params.append(str(filtros["fecha_hasta"]).strip())
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT *
+            FROM horarios_persona
+            {where_sql}
+            ORDER BY nombre, rfc, ente, dia_semana, hora_inicio
+        """, params)
+        rows = [dict(row) for row in cur.fetchall()]
+        conn.close()
+        return rows
+
+    def upsert_observacion_cruce(self, observacion, usuario=""):
+        conflicto_hash = str(observacion.get("conflicto_hash") or "").strip()
+        if not conflicto_hash:
+            raise ValueError("La observación requiere un conflicto_hash.")
+
+        payload = (
+            conflicto_hash,
+            str(observacion.get("rfc") or "").strip().upper(),
+            str(observacion.get("nombre") or "").strip(),
+            self.normalizar_ente_clave(observacion.get("ente_a")) or str(observacion.get("ente_a") or "").strip(),
+            self.normalizar_ente_clave(observacion.get("ente_b")) or str(observacion.get("ente_b") or "").strip(),
+            int(observacion.get("dia_semana", 0)),
+            str(observacion.get("horario_a") or "").strip(),
+            str(observacion.get("horario_b") or "").strip(),
+            int(observacion.get("minutos_traslape", 0)),
+            str(observacion.get("fecha_inicio_a") or "").strip() or None,
+            str(observacion.get("fecha_fin_a") or "").strip() or None,
+            str(observacion.get("fecha_inicio_b") or "").strip() or None,
+            str(observacion.get("fecha_fin_b") or "").strip() or None,
+            str(observacion.get("severidad") or "baja").strip().lower(),
+            str(observacion.get("texto_observacion") or "").strip(),
+            str(observacion.get("recomendacion") or "").strip(),
+            str(observacion.get("estatus") or "pendiente").strip().lower(),
+            usuario or str(observacion.get("creado_por") or "").strip(),
+            str(observacion.get("comentarios_adicionales") or "").strip(),
+            str(observacion.get("referencia_documental") or "").strip(),
+        )
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO observaciones_cruce
+                (conflicto_hash, rfc, nombre, ente_a, ente_b, dia_semana, horario_a, horario_b,
+                 minutos_traslape, fecha_inicio_a, fecha_fin_a, fecha_inicio_b, fecha_fin_b,
+                 severidad, texto_observacion, recomendacion, estatus, creado_por,
+                 comentarios_adicionales, referencia_documental)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(conflicto_hash) DO UPDATE SET
+                nombre=excluded.nombre,
+                ente_a=excluded.ente_a,
+                ente_b=excluded.ente_b,
+                dia_semana=excluded.dia_semana,
+                horario_a=excluded.horario_a,
+                horario_b=excluded.horario_b,
+                minutos_traslape=excluded.minutos_traslape,
+                fecha_inicio_a=excluded.fecha_inicio_a,
+                fecha_fin_a=excluded.fecha_fin_a,
+                fecha_inicio_b=excluded.fecha_inicio_b,
+                fecha_fin_b=excluded.fecha_fin_b,
+                severidad=excluded.severidad,
+                texto_observacion=excluded.texto_observacion,
+                recomendacion=excluded.recomendacion,
+                estatus=excluded.estatus,
+                actualizado=CURRENT_TIMESTAMP,
+                comentarios_adicionales=excluded.comentarios_adicionales,
+                referencia_documental=excluded.referencia_documental
+        """, payload)
+        conn.commit()
+        conn.close()
+        return conflicto_hash
+
+    def actualizar_estatus_observacion_cruce(self, conflicto_hash, estatus, comentarios="", usuario=""):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE observaciones_cruce
+            SET estatus=?, comentarios_adicionales=?, actualizado=CURRENT_TIMESTAMP, creado_por=COALESCE(creado_por, ?)
+            WHERE conflicto_hash=?
+        """, (estatus, comentarios, usuario, conflicto_hash))
+        filas = cur.rowcount
+        conn.commit()
+        conn.close()
+        return filas
+
+    def listar_observaciones_cruce(self, filtros=None):
+        filtros = filtros or {}
+        clauses = []
+        params = []
+        if filtros.get("rfc"):
+            clauses.append("UPPER(rfc)=UPPER(?)")
+            params.append(str(filtros["rfc"]).strip())
+        if filtros.get("estatus"):
+            clauses.append("LOWER(estatus)=LOWER(?)")
+            params.append(str(filtros["estatus"]).strip())
+        if filtros.get("severidad"):
+            clauses.append("LOWER(severidad)=LOWER(?)")
+            params.append(str(filtros["severidad"]).strip())
+        if filtros.get("ente"):
+            ente_clave = self.normalizar_ente_clave(filtros["ente"]) or str(filtros["ente"]).strip()
+            clauses.append("(ente_a=? OR ente_b=?)")
+            params.extend([ente_clave, ente_clave])
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT *
+            FROM observaciones_cruce
+            {where_sql}
+            ORDER BY actualizado DESC, severidad DESC, nombre
+        """, params)
+        rows = [dict(row) for row in cur.fetchall()]
+        conn.close()
+        return rows
+
+    def listar_periodos_quincenales(self, ejercicio=None):
+        clauses = []
+        params = []
+        if ejercicio:
+            clauses.append("ejercicio=?")
+            params.append(int(ejercicio))
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT *
+            FROM periodos_quincenales
+            {where_sql}
+            ORDER BY ejercicio DESC, quincena
+        """, params)
+        rows = [dict(row) for row in cur.fetchall()]
+        conn.close()
+        return rows
+
+    def get_periodo_quincenal(self, etiqueta):
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM periodos_quincenales WHERE etiqueta=?", (str(etiqueta).strip(),))
+        row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else None
+
+    def upsert_pago_pdp(self, pago, usuario=""):
+        payload = (
+            str(pago.get("rfc") or "").strip().upper(),
+            str(pago.get("nombre") or "").strip(),
+            self.normalizar_ente_clave(pago.get("ente")) or str(pago.get("ente") or "").strip(),
+            str(pago.get("periodo_quincenal") or "").strip(),
+            str(pago.get("fecha_inicio_periodo") or "").strip(),
+            str(pago.get("fecha_fin_periodo") or "").strip(),
+            float(pago.get("sueldo_base") or 0),
+            float(pago.get("monto_pdp") or 0),
+            float(pago.get("deducciones") or 0),
+            float(pago.get("percepciones_adicionales") or 0),
+            float(pago.get("total_calculado") or 0),
+            str(pago.get("estatus") or "calculado").strip().lower(),
+            str(pago.get("observaciones") or "").strip(),
+            str(pago.get("conflicto_hash") or "").strip() or None,
+            usuario,
+        )
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO pagos_pdp
+                (rfc, nombre, ente, periodo_quincenal, fecha_inicio_periodo, fecha_fin_periodo,
+                 sueldo_base, monto_pdp, deducciones, percepciones_adicionales, total_calculado,
+                 estatus, observaciones, conflicto_hash, actualizado_por)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(rfc, ente, periodo_quincenal) DO UPDATE SET
+                nombre=excluded.nombre,
+                fecha_inicio_periodo=excluded.fecha_inicio_periodo,
+                fecha_fin_periodo=excluded.fecha_fin_periodo,
+                sueldo_base=excluded.sueldo_base,
+                monto_pdp=excluded.monto_pdp,
+                deducciones=excluded.deducciones,
+                percepciones_adicionales=excluded.percepciones_adicionales,
+                total_calculado=excluded.total_calculado,
+                estatus=excluded.estatus,
+                observaciones=excluded.observaciones,
+                conflicto_hash=excluded.conflicto_hash,
+                actualizado=CURRENT_TIMESTAMP,
+                actualizado_por=excluded.actualizado_por
+        """, payload)
+        conn.commit()
+        conn.close()
+        return True
+
+    def listar_pagos_pdp(self, filtros=None):
+        filtros = filtros or {}
+        clauses = []
+        params = []
+        if filtros.get("periodo_quincenal"):
+            clauses.append("periodo_quincenal=?")
+            params.append(str(filtros["periodo_quincenal"]).strip())
+        if filtros.get("ente"):
+            ente_clave = self.normalizar_ente_clave(filtros["ente"]) or str(filtros["ente"]).strip()
+            clauses.append("ente=?")
+            params.append(ente_clave)
+        if filtros.get("rfc"):
+            clauses.append("UPPER(rfc)=UPPER(?)")
+            params.append(str(filtros["rfc"]).strip())
+        if filtros.get("estatus"):
+            clauses.append("LOWER(estatus)=LOWER(?)")
+            params.append(str(filtros["estatus"]).strip())
+
+        where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT *
+            FROM pagos_pdp
+            {where_sql}
+            ORDER BY fecha_inicio_periodo DESC, nombre, ente
+        """, params)
+        rows = [dict(row) for row in cur.fetchall()]
+        conn.close()
+        return rows
 
     # -------------------------------------------------------
     # Resultados laborales

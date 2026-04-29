@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Cruce de Entes - SASP{% endblock %}
+{% block content %}
+<section class="module-shell">
+  <header class="module-header">
+    <div>
+      <p class="module-kicker">Monitoreo de incompatibilidades</p>
+      <h2>Cruce de Entes</h2>
+      <p>Detecta personas con horarios vigentes que se traslapan en más de un ente y prioriza su revisión.</p>
+    </div>
+    <div class="module-meta-grid">
+      <article><span>Personas</span><strong>{{ resumen.personas }}</strong></article>
+      <article><span>Conflictos</span><strong>{{ resumen.conflictos }}</strong></article>
+      <article><span>Alta</span><strong>{{ resumen.alta }}</strong></article>
+      <article><span>Media / Baja</span><strong>{{ resumen.media + resumen.baja }}</strong></article>
+    </div>
+  </header>
+
+  <section class="workspace-grid workspace-grid-tight">
+    <article class="workspace-card">
+      <div class="section-heading">
+        <div>
+          <h3>Filtros de revisión</h3>
+          <p>Acota por RFC, ente, severidad, periodo y estado de observación.</p>
+        </div>
+      </div>
+      <form method="get" class="dense-form">
+        <div class="form-grid form-grid-compact">
+          <label><span>RFC</span><input type="text" name="rfc" value="{{ filtros.rfc or '' }}"></label>
+          <label>
+            <span>Ente</span>
+            <select name="ente">
+              <option value="">Todos</option>
+              {% for item in catalogo_visible %}
+              <option value="{{ item.clave }}" {% if filtros.ente == item.clave %}selected{% endif %}>{{ item.siglas or item.nombre }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Severidad</span>
+            <select name="severidad">
+              <option value="">Todas</option>
+              {% for severity in ['alta', 'media', 'baja'] %}
+              <option value="{{ severity }}" {% if filtros.severidad == severity %}selected{% endif %}>{{ severity|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Estatus</span>
+            <select name="estatus">
+              <option value="">Todos</option>
+              {% for status in ['pendiente', 'revisada', 'solventada', 'descartada'] %}
+              <option value="{{ status }}" {% if filtros.estatus == status %}selected{% endif %}>{{ status|capitalize }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            <span>Periodo</span>
+            <select name="periodo">
+              <option value="">Todos</option>
+              {% for periodo in periodos_quincenales %}
+              <option value="{{ periodo.etiqueta }}" {% if filtros.periodo == periodo.etiqueta %}selected{% endif %}>{{ periodo.etiqueta }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <div class="action-row">
+          <button type="submit" class="btn btn-primary">Aplicar filtros</button>
+          <a href="{{ url_for('cruce_entes') }}" class="btn btn-secondary">Restablecer</a>
+          <a href="{{ url_for('exportar_reportes_operativos', tipo='cruces', rfc=filtros.rfc, ente=filtros.ente, severidad=filtros.severidad, estatus=filtros.estatus, periodo_quincenal=filtros.periodo) }}" class="btn btn-secondary">Exportar reporte</a>
+        </div>
+      </form>
+    </article>
+
+    <aside class="workspace-card compact-card">
+      <div class="section-heading">
+        <div>
+          <h3>Flujo de revisión</h3>
+          <p>Carga, validación, observación y cierre de conflicto.</p>
+        </div>
+      </div>
+      <ol class="process-steps process-steps-compact">
+        <li class="process-step process-step-completada"><div class="process-step-marker">1</div><div class="process-step-copy"><strong>Carga</strong><p>Horarios vigentes registrados.</p></div></li>
+        <li class="process-step process-step-en-proceso"><div class="process-step-marker">2</div><div class="process-step-copy"><strong>Cruce</strong><p>Detección automática por día, hora y vigencia.</p></div></li>
+        <li class="process-step process-step-lista"><div class="process-step-marker">3</div><div class="process-step-copy"><strong>Observación</strong><p>Generación y seguimiento por severidad.</p></div></li>
+        <li class="process-step process-step-pendiente"><div class="process-step-marker">4</div><div class="process-step-copy"><strong>Cierre</strong><p>Solventación o descarte documentado.</p></div></li>
+      </ol>
+    </aside>
+  </section>
+
+  <article class="workspace-card">
+    <div class="section-heading">
+      <div>
+        <h3>Personas con cruce</h3>
+        <p>Resumen agrupado por persona con severidad máxima, número de entes y estado de revisión.</p>
+      </div>
+    </div>
+    {% if personas %}
+    <div class="entity-grid">
+      {% for persona in personas %}
+      <article class="entity-card">
+        <div class="entity-card-top">
+          <div>
+            <h4>{{ persona.nombre }}</h4>
+            <p>{{ persona.rfc }}</p>
+          </div>
+          <span class="state-pill state-{{ persona.severidad_maxima }}">{{ persona.severidad_maxima|capitalize }}</span>
+        </div>
+        <div class="entity-stats">
+          <span>{{ persona.numero_entes }} entes</span>
+          <span>{{ persona.numero_horarios }} horarios</span>
+          <span>{{ persona.numero_conflictos }} conflictos</span>
+          <span>{{ persona.estatus_revision|capitalize }}</span>
+        </div>
+        <p class="entity-meta">{{ persona.entes|join(' · ') }}</p>
+
+        <ul class="compact-list compact-list-bordered">
+          {% for conflicto in persona.conflictos %}
+          <li>
+            <div class="list-row-top">
+              <strong>{{ conflicto.dia_label }}</strong>
+              <span>{{ conflicto.minutos_traslape }} min</span>
+            </div>
+            <p>{{ conflicto.ente_a_display }} {{ conflicto.hora_inicio_a }} - {{ conflicto.hora_fin_a }} · {{ conflicto.ente_b_display }} {{ conflicto.hora_inicio_b }} - {{ conflicto.hora_fin_b }}</p>
+            <small>{{ conflicto.observacion_automatica }}</small>
+            <form method="post" action="{{ url_for('actualizar_observacion_cruce') }}" class="inline-review-form">
+              <input type="hidden" name="conflicto_hash" value="{{ conflicto.conflicto_hash }}">
+              <input type="hidden" name="redirect_to" value="cruces">
+              <select name="estatus">
+                {% for status in ['pendiente', 'revisada', 'solventada', 'descartada'] %}
+                <option value="{{ status }}" {% if conflicto.estatus_revision == status %}selected{% endif %}>{{ status|capitalize }}</option>
+                {% endfor %}
+              </select>
+              <input type="text" name="comentarios_adicionales" value="{{ conflicto.comentarios_adicionales }}" placeholder="Comentario breve">
+              <button type="submit" class="btn btn-secondary btn-sm">Actualizar</button>
+            </form>
+          </li>
+          {% endfor %}
+        </ul>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-inline">No hay conflictos de horario con los filtros actuales.</div>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}
