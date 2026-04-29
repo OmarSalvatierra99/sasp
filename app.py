@@ -10,9 +10,11 @@ from flask import (
 )
 from werkzeug.exceptions import RequestEntityTooLarge
 import os
+import sys
 import logging
 import pandas as pd
 from io import BytesIO
+from itertools import combinations
 from scripts.utils import (
     DataProcessor,
     DatabaseManager,
@@ -35,6 +37,12 @@ from scripts.utils import (
 from pathlib import Path
 import config
 from logging.handlers import RotatingFileHandler
+
+WORKSPACE_ROOT = Path(__file__).resolve().parent.parent
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+from shared_user_catalog import ordered_users
 
 log_dir = Path('logs')
 log_dir.mkdir(exist_ok=True)
@@ -60,7 +68,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = os.environ.get("SCIL_DB", str(BASE_DIR / "scil.db"))
 db_manager = DatabaseManager(DB_PATH)
 set_db_manager(db_manager)
-data_processor = DataProcessor()  # usa el mismo db_path por defecto
+data_processor = DataProcessor(db_manager=db_manager)
 
 log.info("Iniciando SCIL | CWD=%s | DB=%s", os.getcwd(), DB_PATH)
 
@@ -103,41 +111,108 @@ def health_check():
 # -----------------------------------------------------------
 # LOGIN / LOGOUT
 # -----------------------------------------------------------
+LOGIN_USER_PRIORITY = {"luis": 0, "odilia": 1, "felipe": 2, "gabo": 3}
+WEEK_DAYS = [
+    (0, "Lunes"),
+    (1, "Martes"),
+    (2, "Miércoles"),
+    (3, "Jueves"),
+    (4, "Viernes"),
+    (5, "Sábado"),
+    (6, "Domingo"),
+]
+
+
+def _safe_next_url(raw_url):
+    url = str(raw_url or "").strip()
+    if not url.startswith("/") or url.startswith("//"):
+        return ""
+    return url
+
+
+def _get_login_users():
+    return ordered_users("05-sasp", priority=LOGIN_USER_PRIORITY)
+
+
+def _normalize_session_entes(entes):
+    entes_norm = []
+    for ente in entes or []:
+        ente_txt = str(ente or "").strip()
+        if not ente_txt:
+            continue
+        if _sanitize_text(ente_txt) == "TODOS":
+            return ["TODOS"]
+        clave_norm = db_manager.normalizar_ente_clave(ente_txt)
+        entes_norm.append(clave_norm or ente_txt)
+    return entes_norm
+
+
 @app.route("/", methods=["GET", "POST"])
 def login():
+    usuarios_activos = _get_login_users()
+    preferred_user_display = {
+        user["username"]: user["display_name"]
+        for user in usuarios_activos
+    }
+    selected_username = ""
+    selected_display = "usuario"
+    next_url = _safe_next_url(request.values.get("next", ""))
+
     if request.method == "POST":
-        usuario = request.form.get("usuario", "").strip()
-        clave = request.form.get("clave", "").strip()
+        usuario = (
+            request.form.get("username")
+            or request.form.get("usuario")
+            or ""
+        ).strip().lower()
+        clave = (
+            request.form.get("password")
+            or request.form.get("clave")
+            or ""
+        ).strip()
+        selected_username = usuario
+        selected_display = preferred_user_display.get(usuario, usuario or "usuario")
+        if usuario not in preferred_user_display:
+            log.warning("Intento de acceso fuera de catalogo SASP usuario=%s", usuario)
+            return render_template(
+                "login.html",
+                error="Usuario no autorizado para SASP",
+                usuarios_activos=usuarios_activos,
+                selected_username=selected_username,
+                selected_display=selected_display,
+                preferred_user_display=preferred_user_display,
+                next_url=next_url,
+            )
         user = db_manager.get_usuario(usuario, clave)
         if not user:
             log.warning("Login fallido para usuario=%s", usuario)
-            return render_template("login.html", error="Credenciales inválidas")
+            return render_template(
+                "login.html",
+                error="Credenciales inválidas",
+                usuarios_activos=usuarios_activos,
+                selected_username=selected_username,
+                selected_display=selected_display,
+                preferred_user_display=preferred_user_display,
+                next_url=next_url,
+            )
 
         session.update({
             "usuario": user["usuario"],
             "nombre": user["nombre"],
             "autenticado": True
         })
-
-        # Normalizar entes del usuario a CLAVE oficial cuando aplique
-        entes_norm = []
-        for e in user["entes"]:
-            clave_norm = db_manager.normalizar_ente_clave(e)
-            if clave_norm:
-                entes_norm.append(clave_norm)
-            else:
-                entes_norm.append(e)
-
-        # Asignar permisos especiales
-        if user["usuario"].lower() in {"odilia", "luis", "felipe"}:
-            # Superusuarios: acceso total
-            session["entes"] = ["TODOS"]
-        else:
-            session["entes"] = entes_norm
+        session["entes"] = _normalize_session_entes(user["entes"])
 
         log.info("Login ok usuario=%s entes=%s", user["usuario"], ",".join(session["entes"]))
-        return redirect(url_for("dashboard"))
-    return render_template("login.html")
+        return redirect(next_url or url_for("dashboard"))
+
+    return render_template(
+        "login.html",
+        usuarios_activos=usuarios_activos,
+        selected_username=selected_username,
+        selected_display=selected_display,
+        preferred_user_display=preferred_user_display,
+        next_url=next_url,
+    )
 
 
 @app.route("/logout")
@@ -145,14 +220,18 @@ def logout():
     usuario = session.get("usuario")
     session.clear()
     log.info("Logout usuario=%s", usuario)
-    return redirect("http://192.168.1.248/SIFEET-2025/")
+    return redirect(url_for("login"))
 
 # -----------------------------------------------------------
 # DASHBOARD
 # -----------------------------------------------------------
 @app.route("/dashboard")
 def dashboard():
-    return render_template("dashboard.html", nombre=session.get("nombre"))
+    return render_template(
+        "dashboard.html",
+        nombre=session.get("nombre"),
+        usuario=session.get("usuario"),
+    )
 
 # -----------------------------------------------------------
 # CARGA MASIVA (DataProcessor cruza por RFC y QNAs)
@@ -197,7 +276,8 @@ def upload_laboral():
 # RESULTADOS AGRUPADOS
 # -----------------------------------------------------------
 def _es_usuario_luis():
-    return session.get("usuario", "").strip().lower() in {"luis", "odilia", "felipe"}
+    entes_usuario = [_sanitize_text(v) for v in session.get("entes", [])]
+    return "TODOS" in entes_usuario
 
 
 def _es_usuario_validador():
@@ -219,6 +299,143 @@ def _normalizar_ambito(ambito_sel):
 
 def _ambito_rfc_label(ambito):
     return AMBITO_RFC_LABELS.get(ambito, "Sin clasificar")
+
+
+def _monto_num(value):
+    if value in (None, ""):
+        return 0.0
+    try:
+        return float(
+            str(value)
+            .replace(",", "")
+            .replace("$", "")
+            .replace("MXN", "")
+            .replace("mxn", "")
+            .strip()
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _weekly_amount(value):
+    monto = _monto_num(value)
+    return round(monto / 52.0, 2) if monto else 0.0
+
+
+def _time_to_minutes(value):
+    text = str(value or "").strip()
+    if not text or ":" not in text:
+        return None
+    try:
+        hours, minutes = text.split(":", 1)
+        return int(hours) * 60 + int(minutes)
+    except ValueError:
+        return None
+
+
+def _format_minutes(total_minutes):
+    if total_minutes <= 0:
+        return "0 h"
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    if minutes:
+        return f"{hours} h {minutes:02d} min"
+    return f"{hours} h"
+
+
+def _can_edit_ente(ente_ref):
+    entes_usuario = session.get("entes", [])
+    ente_norm = db_manager.normalizar_ente_clave(ente_ref) or str(ente_ref or "").strip()
+    for ente_usuario in entes_usuario:
+        if _sanitize_text(ente_usuario) == "TODOS":
+            return True
+        if _sanitize_text(ente_usuario) == _sanitize_text(ente_norm):
+            return True
+    return False
+
+
+def _build_horarios_stage(rfc, registros):
+    horarios_guardados = db_manager.get_horarios_por_rfc(rfc)
+    per_ente = []
+    total_weekly = 0.0
+    total_annual = 0.0
+
+    for reg in registros or []:
+        ente_clave = db_manager.normalizar_ente_clave(reg.get("ente")) or reg.get("ente")
+        annual_amount = _monto_num(reg.get("monto"))
+        weekly_amount = _weekly_amount(reg.get("monto"))
+        total_annual += annual_amount
+        total_weekly += weekly_amount
+
+        day_rows = {day_number: {"hora_inicio": "", "hora_fin": "", "observaciones": ""} for day_number, _ in WEEK_DAYS}
+        weekly_minutes = 0
+
+        for row in horarios_guardados.get(ente_clave, []):
+            dia_semana = int(row.get("dia_semana", -1))
+            if dia_semana not in day_rows:
+                continue
+            day_rows[dia_semana] = {
+                "hora_inicio": row.get("hora_inicio", ""),
+                "hora_fin": row.get("hora_fin", ""),
+                "observaciones": row.get("observaciones", ""),
+            }
+            inicio = _time_to_minutes(row.get("hora_inicio"))
+            fin = _time_to_minutes(row.get("hora_fin"))
+            if inicio is not None and fin is not None and fin > inicio:
+                weekly_minutes += fin - inicio
+
+        per_ente.append({
+            "ente_clave": ente_clave,
+            "ente_display": _ente_display(ente_clave),
+            "puesto": reg.get("puesto") or "Sin puesto",
+            "annual_amount": annual_amount,
+            "weekly_amount": weekly_amount,
+            "weekly_minutes": weekly_minutes,
+            "weekly_hours_label": _format_minutes(weekly_minutes),
+            "can_edit": _can_edit_ente(ente_clave),
+            "days": [
+                {
+                    "number": day_number,
+                    "label": day_label,
+                    **day_rows[day_number],
+                }
+                for day_number, day_label in WEEK_DAYS
+            ],
+        })
+
+    conflicts = []
+    for left, right in combinations(per_ente, 2):
+        for day_number, day_label in WEEK_DAYS:
+            left_day = next(day for day in left["days"] if day["number"] == day_number)
+            right_day = next(day for day in right["days"] if day["number"] == day_number)
+            left_start = _time_to_minutes(left_day["hora_inicio"])
+            left_end = _time_to_minutes(left_day["hora_fin"])
+            right_start = _time_to_minutes(right_day["hora_inicio"])
+            right_end = _time_to_minutes(right_day["hora_fin"])
+
+            if None in {left_start, left_end, right_start, right_end}:
+                continue
+
+            overlap_start = max(left_start, right_start)
+            overlap_end = min(left_end, right_end)
+            if overlap_end > overlap_start:
+                conflicts.append({
+                    "day_label": day_label,
+                    "left_ente": left["ente_display"],
+                    "right_ente": right["ente_display"],
+                    "range": f"{left_day['hora_inicio']}-{left_day['hora_fin']} vs {right_day['hora_inicio']}-{right_day['hora_fin']}",
+                })
+
+    return {
+        "per_ente": per_ente,
+        "conflicts": conflicts,
+        "total_weekly": round(total_weekly, 2),
+        "total_annual": round(total_annual, 2),
+        "has_complete_schedule": any(
+            any(day["hora_inicio"] and day["hora_fin"] for day in ente["days"])
+            for ente in per_ente
+        ),
+    }
 
 
 def _tipo_ente(ente_clave):
@@ -772,7 +989,45 @@ def resultados_por_rfc(rfc):
                 reg["estado_ente"] = mapa_solvs[ente_clave]["estado"]
                 reg["comentario_ente"] = mapa_solvs[ente_clave]["comentario"]
 
-    return render_template("detalle_rfc.html", rfc=rfc, info=info, es_luis=es_luis)
+    horarios_stage = _build_horarios_stage(rfc, info.get("registros", []))
+    return render_template(
+        "detalle_rfc.html",
+        rfc=rfc,
+        info=info,
+        es_luis=es_luis,
+        horarios_stage=horarios_stage,
+        week_days=WEEK_DAYS,
+        db_manager=db_manager,
+        _sanitize_text=_sanitize_text,
+    )
+
+
+@app.route("/resultados/<rfc>/horarios", methods=["POST"])
+def guardar_horarios_rfc(rfc):
+    if not session.get("autenticado"):
+        return redirect(url_for("login"))
+
+    ente = request.form.get("ente", "")
+    if not _can_edit_ente(ente):
+        return redirect(url_for("resultados_por_rfc", rfc=rfc))
+
+    horarios = []
+    for day_number, _day_label in WEEK_DAYS:
+        horarios.append({
+            "dia_semana": day_number,
+            "hora_inicio": request.form.get(f"hora_inicio_{day_number}", ""),
+            "hora_fin": request.form.get(f"hora_fin_{day_number}", ""),
+            "observaciones": request.form.get(f"observaciones_{day_number}", ""),
+        })
+
+    filas = db_manager.guardar_horarios_laborales(
+        rfc,
+        ente,
+        horarios,
+        usuario=session.get("usuario", ""),
+    )
+    log.info("Horarios actualizados rfc=%s ente=%s filas=%s", rfc, ente, filas)
+    return redirect(url_for("resultados_por_rfc", rfc=rfc, _anchor="etapa2"))
 
 
 @app.route("/solventacion/<rfc>", methods=["GET", "POST"])

@@ -2051,3 +2051,338 @@ input[type="text"]:focus {
   border-color: #1b5da8;
   box-shadow: 0 0 0 4px rgba(27, 93, 168, 0.14);
 }
+
+.site-footer {
+  padding: 1rem 1.5rem 2rem;
+  text-align: center;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.nav-user-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.55rem 0.95rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  color: #fff;
+  font-weight: 600;
+}
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.login-shell {
+  width: min(1080px, calc(100% - 2rem));
+  max-width: 1080px;
+  padding: 2rem 0;
+}
+
+.login-auth-panel {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid var(--color-border);
+  border-radius: 24px;
+  padding: 2rem;
+  box-shadow: 0 24px 50px rgba(7, 29, 58, 0.12);
+}
+
+.login-logo-wrap,
+.login-header,
+.login-access-card,
+.login-form {
+  grid-column: span 1;
+}
+
+.login-logo-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ofs-logo {
+  width: 120px;
+  height: auto;
+}
+
+.panel-header h1 {
+  font-size: 2.4rem;
+  margin: 0.3rem 0 0.5rem;
+  color: #0a356a;
+}
+
+.eyebrow {
+  margin: 0;
+  color: var(--color-primary-light);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.login-access-card,
+.login-password-panel,
+.metric-card,
+.schedule-card {
+  background: #fff;
+  border: 1px solid #d9e6f2;
+  border-radius: 18px;
+  box-shadow: 0 12px 28px rgba(7, 29, 58, 0.06);
+}
+
+.login-access-card,
+.login-password-panel {
+  padding: 1.25rem;
+}
+
+.login-access-card h3,
+.login-password-title {
+  margin: 0 0 1rem;
+  color: #0a356a;
+}
+
+.login-access-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.login-access-user {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  width: 100%;
+  padding: 0.85rem 1rem;
+  border-radius: 16px;
+  border: 1px solid #d5e0ed;
+  background: #f8fbff;
+  text-align: left;
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.login-access-user:hover,
+.login-access-user.is-selected {
+  border-color: #1b5da8;
+  background: #eef5ff;
+  transform: translateY(-1px);
+}
+
+.login-access-initials {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(180deg, #1b5da8, #0b3a75);
+  color: #fff;
+  font-weight: 700;
+}
+
+.login-access-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.login-access-meta small {
+  color: var(--color-muted);
+}
+
+.login-password-panel {
+  display: none;
+}
+
+.login-password-panel.is-visible {
+  display: block;
+}
+
+.field {
+  display: grid;
+  gap: 0.45rem;
+  margin-bottom: 1rem;
+}
+
+.field label,
+.metric-label {
+  font-size: var(--text-sm);
+  color: var(--color-muted);
+  font-weight: 600;
+}
+
+input[type="password"],
+input[type="time"],
+input[type="text"],
+textarea,
+select {
+  width: 100%;
+  padding: 0.7rem 0.9rem;
+  border-radius: 12px;
+  border: 1px solid #c9d9ea;
+  background: #fff;
+  color: var(--color-text);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+.dashboard-summary,
+.stage-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.metric-card {
+  padding: 1rem 1.15rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.metric-card strong {
+  font-size: 1.2rem;
+  color: #0a356a;
+}
+
+.metric-card small {
+  color: var(--color-muted);
+}
+
+.detalle-hero,
+.section-heading,
+.schedule-card-header,
+.schedule-actions,
+.detail-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.stage-section {
+  margin-top: 1.5rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #e4edf6;
+}
+
+.stage-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: #e9f2fd;
+  color: #0b3a75;
+  font-size: 0.8rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stage-badge-secondary {
+  background: #eef7f0;
+  color: #1f5a39;
+}
+
+.status {
+  border-radius: 14px;
+  padding: 0.9rem 1rem;
+  border: 1px solid transparent;
+}
+
+.status-success {
+  background: var(--status-success-bg);
+  color: var(--status-success-text);
+  border-color: #bae6d0;
+}
+
+.status-error {
+  background: var(--status-error-bg);
+  color: var(--status-error-text);
+  border-color: #fecaca;
+}
+
+.stage-alert {
+  margin-bottom: 1rem;
+}
+
+.schedule-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.schedule-card {
+  padding: 1rem 1.1rem;
+}
+
+.schedule-card-header h4 {
+  margin: 0 0 0.3rem;
+  color: #0a356a;
+}
+
+.schedule-card-header p,
+.schedule-metrics span,
+.schedule-metrics small {
+  margin: 0;
+  color: var(--color-muted);
+}
+
+.schedule-metrics {
+  display: grid;
+  gap: 0.2rem;
+  text-align: right;
+}
+
+.schedule-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+
+.schedule-table th,
+.schedule-table td {
+  padding: 0.65rem 0.55rem;
+  border-bottom: 1px solid #e2ebf4;
+  vertical-align: middle;
+}
+
+.schedule-table th {
+  text-align: left;
+  background: #f6faff;
+  color: #244468;
+}
+
+.schedule-actions {
+  margin-top: 1rem;
+}
+
+@media (max-width: 900px) {
+  .login-auth-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .nav-links {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    padding: 0.5rem;
+  }
+
+  .nav-user-chip {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .schedule-metrics {
+    text-align: left;
+  }
+}

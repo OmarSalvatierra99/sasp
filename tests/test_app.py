@@ -34,6 +34,7 @@ def test_login_page_loads(client):
     """GET / debe mostrar el formulario de login."""
     r = client.get("/")
     assert r.status_code == 200
+    assert "Usuarios autorizados" in r.get_data(as_text=True)
 
 
 def test_dashboard_redirects_when_not_logged_in(client):

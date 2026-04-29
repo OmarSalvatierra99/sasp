@@ -12,9 +12,6 @@
 </head>
 
 <body>
-  <!-- ==========================================
-       BARRA DE NAVEGACIÓN
-  =========================================== -->
   <nav class="navbar">
     <div class="nav-container">
       <div class="nav-brand">
@@ -27,32 +24,21 @@
       </div>
 
       <div class="nav-links">
-        <a href="{{ url_for('dashboard') }}" 
-           class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}">Inicio</a>
-
-        <a href="{{ url_for('reporte_por_ente') }}" 
-           class="nav-link {% if request.endpoint == 'reporte_por_ente' %}active{% endif %}">Resultados</a>
-
-        <a href="{{ url_for('catalogos_home') }}" 
-           class="nav-link {% if request.endpoint == 'catalogos_home' %}active{% endif %}">Catálogos</a>
-
+        <span class="nav-user-chip">{{ session.get('nombre', session.get('usuario', 'Usuario')) }}</span>
+        <a href="{{ url_for('dashboard') }}" class="nav-link {% if request.endpoint == 'dashboard' %}active{% endif %}">Inicio</a>
+        <a href="{{ url_for('reporte_por_ente') }}" class="nav-link {% if request.endpoint == 'reporte_por_ente' %}active{% endif %}">Resultados</a>
+        <a href="{{ url_for('catalogos_home') }}" class="nav-link {% if request.endpoint == 'catalogos_home' %}active{% endif %}">Catálogos</a>
         <a href="{{ url_for('logout') }}" class="nav-link">Salir</a>
       </div>
     </div>
   </nav>
 
-  <!-- ==========================================
-       CONTENIDO PRINCIPAL
-  =========================================== -->
   <main class="main-content">
     {% block content %}{% endblock %}
   </main>
 
-  <!-- ==========================================
-       PIE DE PÁGINA
-  =========================================== -->
-  <footer>
-    <p>© 2025 Órgano de Fiscalización Superior del Congreso del Estado de Tlaxcala — SASP</p>
+  <footer class="site-footer">
+    <p>© 2026 Órgano de Fiscalización Superior del Estado de Tlaxcala · SASP</p>
   </footer>
 </body>
 </html>

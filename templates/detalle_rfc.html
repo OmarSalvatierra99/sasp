@@ -3,96 +3,182 @@
 
 {% block content %}
 <div class="detalle-container">
-  <div class="detalle-header">
-    <p><strong>RFC:</strong> {{ rfc }}</p>
-    <p><strong>Nombre:</strong> {{ info.nombre or 'Sin nombre' }}</p>
-  </div>
+  <header class="detalle-hero">
+    <div>
+      <p class="eyebrow">Seguimiento individual</p>
+      <h2>{{ info.nombre or 'Sin nombre' }}</h2>
+      <p class="subtitle">RFC: <strong>{{ rfc }}</strong></p>
+    </div>
+    <div class="detail-actions">
+      <a href="{{ url_for('reporte_por_ente') }}" class="btn btn-secondary">Regresar a resultados</a>
+    </div>
+  </header>
 
-  <table class="tabla-detalle">
-    <thead>
-      <tr>
-        <th>Ente Incompatibilidad</th>
-        <th>Puesto</th>
-        {% if es_luis %}
-          <th>Total Percepciones Anuales</th>
-        {% endif %}
-        <th>Quincenas</th>
-        <th>Fecha Alta</th>
-        <th>Fecha Baja</th>
-        <th>Estado</th>
-        <th>Valoración</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for r in info.registros %}
-        {% set qnas = r.qnas.keys() if r.qnas is mapping else [] %}
-        {% set activo_total = qnas|length >= 24 %}
+  <section class="stage-section">
+    <div class="section-heading">
+      <div>
+        <span class="stage-badge">Etapa 1</span>
+        <h3>Cruce quincenal y solventación</h3>
+      </div>
+      <p class="subtitle">Revisión operativa del cruce detectado por RFC y ente.</p>
+    </div>
 
-        {# permisos por ente #}
-        {% set ns = namespace(editable=false) %}
-        {% set clave_ente = db_manager.normalizar_ente_clave(r.ente) %}
-        {% for e in session.get('entes', []) %}
-          {% if _sanitize_text(e) == 'TODOS' or _sanitize_text(e) == _sanitize_text(clave_ente) %}
-            {% set ns.editable = true %}
-          {% endif %}
-        {% endfor %}
-
+    <table class="tabla-detalle">
+      <thead>
         <tr>
-          <td>{{ db_manager.normalizar_ente(r.ente) or r.ente or 'Desconocido' }}</td>
-          <td>{{ r.puesto or 'Sin puesto' }}</td>
+          <th>Ente incompatibilidad</th>
+          <th>Puesto</th>
           {% if es_luis %}
+            <th>Total percepciones anuales</th>
+          {% endif %}
+          <th>Quincenas</th>
+          <th>Fecha alta</th>
+          <th>Fecha baja</th>
+          <th>Estado</th>
+          <th>Valoración</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in info.registros %}
+          {% set qnas = r.qnas.keys() if r.qnas is mapping else [] %}
+          {% set activo_total = qnas|length >= 24 %}
+          {% set clave_ente = db_manager.normalizar_ente_clave(r.ente) %}
+          {% set ns = namespace(editable=false) %}
+          {% for e in session.get('entes', []) %}
+            {% if _sanitize_text(e) == 'TODOS' or _sanitize_text(e) == _sanitize_text(clave_ente) %}
+              {% set ns.editable = true %}
+            {% endif %}
+          {% endfor %}
+
+          <tr>
+            <td>{{ db_manager.normalizar_ente(r.ente) or r.ente or 'Desconocido' }}</td>
+            <td>{{ r.puesto or 'Sin puesto' }}</td>
+            {% if es_luis %}
+              <td>
+                {% if r.monto is not none and r.monto != '' %}
+                  {% set monto_num = (r.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
+                  {{ "MXN {:,.2f}".format(monto_num) }}
+                {% else %}-{% endif %}
+              </td>
+            {% endif %}
             <td>
-              {% if r.monto is not none and r.monto != '' %}
-                {% set monto_num = (r.monto|string)|replace(',', '')|replace('$', '')|replace('MXN', '')|replace('mxn', '')|trim|float %}
-                {{ "MXN {:,.2f}".format(monto_num) }}
+              {% if activo_total %}
+                <span class="activo-total">Activo en todo el ejercicio</span>
+              {% elif qnas %}
+                {{ qnas|list|ordenar_quincenas|join(', ') }}
               {% else %}-{% endif %}
             </td>
-          {% endif %}
-          <td>
-            {% if activo_total %}
-              <span class="activo-total">Activo en todo el ejercicio</span>
-            {% elif qnas %}
-              {{ qnas|list|ordenar_quincenas|join(', ') }}
-            {% else %}-{% endif %}
-          </td>
-          <td>{{ r.fecha_ingreso or '-' }}</td>
-          <td>{{ r.fecha_egreso or '-' }}</td>
-          <td>
-            {% if r.estado_ente %}
+            <td>{{ r.fecha_ingreso or '-' }}</td>
+            <td>{{ r.fecha_egreso or '-' }}</td>
+            <td>
               {% if r.estado_ente == 'Solventado' %}
                 <span class="estado estado-verde">Solventado</span>
               {% elif r.estado_ente == 'No Solventado' %}
-                <span class="estado estado-rojo">No Solventado</span>
+                <span class="estado estado-rojo">No solventado</span>
               {% else %}
                 <span class="estado estado-gris">Sin valoración</span>
               {% endif %}
-            {% else %}
-              {% if info.estado == 'Solventado' %}
-                <span class="estado estado-verde">Solventado</span>
-              {% elif info.estado == 'No Solventado' %}
-                <span class="estado estado-rojo">No Solventado</span>
+            </td>
+            <td class="accion">
+              {% if ns.editable %}
+                <a class="btn btn-primary" href="{{ url_for('solventacion_detalle', rfc=rfc) }}?ente={{ r.ente }}">Editar</a>
               {% else %}
-                <span class="estado estado-gris">Sin valoración</span>
+                <span class="bloqueado">Bloqueado</span>
               {% endif %}
-            {% endif %}
-          </td>
-          <td class="accion">
-            {% if ns.editable %}
-              <button class="btn btn-primary"
-                      onclick="window.location.href='{{ url_for('solventacion_detalle', rfc=rfc) }}?ente={{ r.ente }}'">
-                {% if r.estado_ente == 'Solventado' %}Editar{% else %}Editar{% endif %}
-              </button>
-            {% else %}
-              <span class="bloqueado">Bloqueado</span>
-            {% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
 
-  <div class="btn-area">
-    <a href="{{ url_for('reporte_por_ente') }}" class="btn btn-secondary">← Regresar</a>
-  </div>
+  <section id="etapa2" class="stage-section">
+    <div class="section-heading">
+      <div>
+        <span class="stage-badge stage-badge-secondary">Etapa 2</span>
+        <h3>Cruce de horarios y percepciones semanales</h3>
+      </div>
+      <p class="subtitle">Capture horarios por ente para revisar compatibilidad semanal y el monto equivalente por semana.</p>
+    </div>
+
+    <div class="stage-summary-grid">
+      <article class="metric-card">
+        <span class="metric-label">Percepciones anuales</span>
+        <strong>MXN {{ "{:,.2f}".format(horarios_stage.total_annual or 0) }}</strong>
+        <small>Suma de entes mostrados</small>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Percepción semanal estimada</span>
+        <strong>MXN {{ "{:,.2f}".format(horarios_stage.total_weekly or 0) }}</strong>
+        <small>Equivalente anual / 52 semanas</small>
+      </article>
+      <article class="metric-card">
+        <span class="metric-label">Cruces de horario</span>
+        <strong>{{ horarios_stage.conflicts|length }}</strong>
+        <small>{% if horarios_stage.conflicts %}Requieren revisión{% else %}Sin traslapes detectados{% endif %}</small>
+      </article>
+    </div>
+
+    {% if horarios_stage.conflicts %}
+      <div class="status status-error stage-alert">
+        {% for conflict in horarios_stage.conflicts %}
+          <div><strong>{{ conflict.day_label }}:</strong> {{ conflict.left_ente }} vs {{ conflict.right_ente }} ({{ conflict.range }})</div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="status status-success stage-alert">
+        No se detectaron traslapes entre los horarios capturados.
+      </div>
+    {% endif %}
+
+    <div class="schedule-grid">
+      {% for ente in horarios_stage.per_ente %}
+        <article class="schedule-card">
+          <header class="schedule-card-header">
+            <div>
+              <h4>{{ ente.ente_display }}</h4>
+              <p>{{ ente.puesto }}</p>
+            </div>
+            <div class="schedule-metrics">
+              <span>MXN {{ "{:,.2f}".format(ente.annual_amount or 0) }} anual</span>
+              <strong>MXN {{ "{:,.2f}".format(ente.weekly_amount or 0) }} semanal</strong>
+              <small>{{ ente.weekly_hours_label }} capturadas</small>
+            </div>
+          </header>
+
+          <form method="POST" action="{{ url_for('guardar_horarios_rfc', rfc=rfc) }}" class="schedule-form">
+            <input type="hidden" name="ente" value="{{ ente.ente_clave }}">
+            <table class="schedule-table">
+              <thead>
+                <tr>
+                  <th>Día</th>
+                  <th>Inicio</th>
+                  <th>Fin</th>
+                  <th>Observación</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for day in ente.days %}
+                  <tr>
+                    <td>{{ day.label }}</td>
+                    <td><input type="time" name="hora_inicio_{{ day.number }}" value="{{ day.hora_inicio }}"></td>
+                    <td><input type="time" name="hora_fin_{{ day.number }}" value="{{ day.hora_fin }}"></td>
+                    <td><input type="text" name="observaciones_{{ day.number }}" value="{{ day.observaciones }}" placeholder="Opcional"></td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+            <div class="schedule-actions">
+              {% if ente.can_edit %}
+                <button type="submit" class="btn btn-primary">Guardar horario</button>
+              {% else %}
+                <span class="bloqueado">Sin permisos para este ente</span>
+              {% endif %}
+            </div>
+          </form>
+        </article>
+      {% endfor %}
+    </div>
+  </section>
 </div>
 {% endblock %}

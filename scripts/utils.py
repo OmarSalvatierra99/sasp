@@ -8,6 +8,7 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 import unicodedata
 from collections import defaultdict
 from datetime import date, datetime
@@ -65,16 +66,45 @@ def _normalize_ente_alias(s):
 class DatabaseManager:
     def __init__(self, db_path="scil.db"):
         self.db_path = db_path
+        self._catalog_lock = threading.Lock()
+        self._catalog_snapshot = None
+        self._connect_target = db_path
+        self._connect_uri = False
+        self._memory_keeper = None
+        if db_path == ":memory:":
+            self._connect_target = "file:05-sasp-memory?mode=memory&cache=shared"
+            self._connect_uri = True
+            self._memory_keeper = sqlite3.connect(
+                self._connect_target,
+                timeout=30,
+                check_same_thread=False,
+                uri=True,
+            )
+            self._configure_connection(self._memory_keeper)
         print(f"📂 Base de datos en uso: {Path(self.db_path).resolve()}")
         self._init_db()
 
     # -------------------------------------------------------
     # Conexión
     # -------------------------------------------------------
-    def _connect(self):
-        conn = sqlite3.connect(self.db_path)
+    def _configure_connection(self, conn):
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA cache_size=-20000")
+        conn.execute("PRAGMA busy_timeout=30000")
         return conn
+
+    def _connect(self):
+        conn = sqlite3.connect(
+            self._connect_target,
+            timeout=30,
+            check_same_thread=False,
+            uri=self._connect_uri,
+        )
+        return self._configure_connection(conn)
 
     # -------------------------------------------------------
     # Inicialización de tablas
@@ -187,6 +217,19 @@ class DatabaseManager:
                 activo INTEGER DEFAULT 1,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
+
+            CREATE TABLE IF NOT EXISTS horarios_laborales (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                rfc TEXT NOT NULL,
+                ente TEXT NOT NULL,
+                dia_semana INTEGER NOT NULL,
+                hora_inicio TEXT,
+                hora_fin TEXT,
+                observaciones TEXT,
+                actualizado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                actualizado_por TEXT,
+                UNIQUE(rfc, ente, dia_semana)
+            );
         """)
         conn.commit()
 
@@ -196,13 +239,79 @@ class DatabaseManager:
         self._migrate_entes_siglas(cur)
         self._migrate_catalogos_mayusculas(cur)
         self._sync_catalog_users(cur)
+        self._create_indexes(cur)
+        self._invalidate_catalog_cache()
 
         conn.commit()
         conn.close()
         print(f"✅ Tablas listas en {self.db_path}")
 
+    def _create_indexes(self, cur):
+        cur.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_registros_laborales_rfc
+                ON registros_laborales(rfc);
+            CREATE INDEX IF NOT EXISTS idx_registros_laborales_ente
+                ON registros_laborales(ente);
+            CREATE INDEX IF NOT EXISTS idx_registros_laborales_rfc_ente
+                ON registros_laborales(rfc, ente);
+            CREATE INDEX IF NOT EXISTS idx_solventaciones_rfc
+                ON solventaciones(rfc);
+            CREATE INDEX IF NOT EXISTS idx_solventaciones_rfc_ente
+                ON solventaciones(rfc, ente);
+            CREATE INDEX IF NOT EXISTS idx_prevalidaciones_rfc
+                ON prevalidaciones(rfc);
+            CREATE INDEX IF NOT EXISTS idx_prevalidaciones_rfc_ente
+                ON prevalidaciones(rfc, ente);
+            CREATE INDEX IF NOT EXISTS idx_usuarios_usuario
+                ON usuarios(usuario);
+            CREATE INDEX IF NOT EXISTS idx_horarios_laborales_rfc
+                ON horarios_laborales(rfc);
+            CREATE INDEX IF NOT EXISTS idx_horarios_laborales_ente
+                ON horarios_laborales(ente);
+            CREATE INDEX IF NOT EXISTS idx_horarios_laborales_rfc_ente
+                ON horarios_laborales(rfc, ente);
+        """)
+
+    def _invalidate_catalog_cache(self):
+        with self._catalog_lock:
+            self._catalog_snapshot = None
+
+    def _get_catalog_snapshot(self):
+        with self._catalog_lock:
+            if self._catalog_snapshot is not None:
+                return self._catalog_snapshot
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT num, clave, nombre, siglas, clasificacion, ambito, 'ENTE' AS tipo_tabla
+            FROM entes
+            WHERE activo=1
+            UNION ALL
+            SELECT num, clave, nombre, siglas, clasificacion, ambito, 'MUNICIPIO' AS tipo_tabla
+            FROM municipios
+            WHERE activo=1
+        """)
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+
+        lookup = {}
+        for row in rows:
+            for raw_value in (row.get("clave"), row.get("siglas"), row.get("nombre")):
+                normalized = self._sanitize(raw_value)
+                if normalized and normalized not in lookup:
+                    lookup[normalized] = row
+
+        snapshot = {"rows": rows, "lookup": lookup}
+        with self._catalog_lock:
+            self._catalog_snapshot = snapshot
+        return snapshot
+
+    def get_catalog_lookup(self):
+        return dict(self._get_catalog_snapshot()["lookup"])
+
     def _sync_catalog_users(self, cur):
-        for catalog_user in list_users():
+        for catalog_user in list_users(project_key="05-sasp"):
             username = str(catalog_user.get("usuario") or "").strip().lower()
             password = str(catalog_user.get("clave") or "").strip()
             display_name = str(catalog_user.get("nombre_completo") or username).strip()
@@ -421,38 +530,8 @@ class DatabaseManager:
         """
         if not valor:
             return None
-        clave = self.normalizar_ente_clave(valor)
-        if clave:
-            conn = self._connect()
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT nombre FROM (
-                    SELECT clave, nombre FROM entes WHERE activo=1
-                    UNION ALL
-                    SELECT clave, nombre FROM municipios WHERE activo=1
-                )
-                WHERE UPPER(clave)=UPPER(?)
-                LIMIT 1
-            """, (clave,))
-            row = cur.fetchone()
-            conn.close()
-            if row:
-                return row[0]
-
-        conn = self._connect()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT nombre FROM (
-                SELECT nombre, siglas, clave FROM entes WHERE activo=1
-                UNION ALL
-                SELECT nombre, siglas, clave FROM municipios WHERE activo=1
-            )
-            WHERE UPPER(siglas)=UPPER(?) OR UPPER(clave)=UPPER(?) OR UPPER(nombre)=UPPER(?)
-            LIMIT 1
-        """, (valor, valor, valor))
-        row = cur.fetchone()
-        conn.close()
-        return row[0] if row else None
+        row = self._get_catalog_snapshot()["lookup"].get(self._sanitize(valor))
+        return row["nombre"] if row else None
 
     def normalizar_ente_clave(self, valor):
         """
@@ -461,41 +540,69 @@ class DatabaseManager:
         """
         if not valor:
             return None
-        val = self._sanitize(valor)
+        row = self._get_catalog_snapshot()["lookup"].get(self._sanitize(valor))
+        return row["clave"] if row else None
+
+    def guardar_horarios_laborales(self, rfc, ente, horarios, usuario=""):
+        rfc_norm = str(rfc or "").strip().upper()
+        ente_norm = self.normalizar_ente_clave(ente) or str(ente or "").strip()
+        if not rfc_norm or not ente_norm:
+            return 0
+
         conn = self._connect()
         cur = conn.cursor()
+        cur.execute("DELETE FROM horarios_laborales WHERE rfc=? AND ente=?", (rfc_norm, ente_norm))
 
-        # Resolver por equivalencias primero (SM/SMyT/SMYT, SEFIN/SF, SOTYV, etc.)
-        cur.execute("""
-            SELECT clave, siglas, nombre FROM (
-                SELECT clave, siglas, nombre FROM entes WHERE activo=1
-                UNION ALL
-                SELECT clave, siglas, nombre FROM municipios WHERE activo=1
-            )
-        """)
-        row = None
-        for cand in cur.fetchall():
-            cand_clave = self._sanitize(cand["clave"])
-            cand_sigla = self._sanitize(cand["siglas"])
-            cand_nombre = self._sanitize(cand["nombre"])
-            if val in {cand_clave, cand_sigla, cand_nombre}:
-                row = cand
-                break
+        filas = 0
+        for horario in horarios:
+            dia_semana = int(horario.get("dia_semana", -1))
+            hora_inicio = str(horario.get("hora_inicio") or "").strip()
+            hora_fin = str(horario.get("hora_fin") or "").strip()
+            observaciones = str(horario.get("observaciones") or "").strip()
 
-        # Fallback exacto por SQL para conservar comportamiento previo
-        if row is None:
+            if dia_semana < 0 or dia_semana > 6:
+                continue
+            if not hora_inicio or not hora_fin:
+                continue
+
             cur.execute("""
-                SELECT clave FROM (
-                    SELECT clave, siglas, nombre FROM entes WHERE activo=1
-                    UNION ALL
-                    SELECT clave, siglas, nombre FROM municipios WHERE activo=1
-                )
-                WHERE UPPER(siglas)=UPPER(?) OR UPPER(nombre)=UPPER(?) OR UPPER(clave)=UPPER(?)
-                LIMIT 1
-            """, (valor, valor, valor))
-            row = cur.fetchone()
+                INSERT INTO horarios_laborales
+                    (rfc, ente, dia_semana, hora_inicio, hora_fin, observaciones, actualizado, actualizado_por)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            """, (rfc_norm, ente_norm, dia_semana, hora_inicio, hora_fin, observaciones, usuario))
+            filas += 1
+
+        conn.commit()
         conn.close()
-        return row["clave"] if row else None
+        return filas
+
+    def get_horarios_por_rfc(self, rfc):
+        rfc_norm = str(rfc or "").strip().upper()
+        if not rfc_norm:
+            return {}
+
+        conn = self._connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT ente, dia_semana, hora_inicio, hora_fin, observaciones, actualizado, actualizado_por
+            FROM horarios_laborales
+            WHERE rfc=?
+            ORDER BY ente, dia_semana
+        """, (rfc_norm,))
+        rows = cur.fetchall()
+        conn.close()
+
+        horarios = defaultdict(list)
+        for row in rows:
+            horarios[row["ente"]].append({
+                "dia_semana": row["dia_semana"],
+                "hora_inicio": row["hora_inicio"] or "",
+                "hora_fin": row["hora_fin"] or "",
+                "observaciones": row["observaciones"] or "",
+                "actualizado": row["actualizado"],
+                "actualizado_por": row["actualizado_por"] or "",
+            })
+        return dict(horarios)
 
     # -------------------------------------------------------
     # Resultados laborales
@@ -1141,8 +1248,8 @@ class DataProcessor:
     - Genera registros de cruces (duplicaciones) y empleados únicos
     """
 
-    def __init__(self):
-        self.db = DatabaseManager("scil.db")
+    def __init__(self, db_manager=None, db_path="scil.db"):
+        self.db = db_manager or DatabaseManager(db_path)
         self.mapa_siglas = self.db.get_mapa_siglas()
         self.mapa_inverso = self.db.get_mapa_claves_inverso()
 

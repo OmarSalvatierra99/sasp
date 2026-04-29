@@ -3,50 +3,60 @@
 
 {% block content %}
 <div class="dashboard">
-
-  <!-- Encabezado -->
   <header class="page-header">
-    <h2>Bienvenido(a), {{ nombre }}</h2>
+    <h2>{{ nombre }}</h2>
     <p class="subtitle">
-      Cargue los archivos de nómina por quincena para su validación.<br>
-      El sistema detectará automáticamente posibles duplicidades de personal entre entes.
+      Cargue los archivos de nómina por quincena para actualizar la base operativa.
+      El sistema normaliza entes, sincroniza usuarios compartidos y detecta cruces entre entes de forma automática.
     </p>
   </header>
 
+  <section class="dashboard-summary">
+    <article class="metric-card">
+      <span class="metric-label">Usuario activo</span>
+      <strong>{{ nombre }}</strong>
+      <small>{{ usuario }}</small>
+    </article>
+    <article class="metric-card">
+      <span class="metric-label">Etapa 1</span>
+      <strong>Cruce quincenal</strong>
+      <small>Duplicidad entre entes por RFC</small>
+    </article>
+    <article class="metric-card">
+      <span class="metric-label">Etapa 2</span>
+      <strong>Cruce de horarios</strong>
+      <small>Revisión semanal por ente en el detalle RFC</small>
+    </article>
+  </section>
+
   <div class="template-download">
     <a href="{{ url_for('descargar_plantilla') }}" class="btn btn-success">
-      📥 Descargar plantilla Excel
+      Descargar plantilla Excel
     </a>
   </div>
 
-
-  <!-- Área de carga -->
   <section class="upload-section">
     <form id="uploadForm" method="POST" enctype="multipart/form-data" action="{{ url_for('upload_laboral') }}">
       <div class="upload-area" id="uploadArea" tabindex="0" aria-label="Área para subir archivos Excel">
-        <div class="upload-icon">📂</div>
+        <div class="upload-icon">XLSX</div>
         <div class="upload-text">
           <h3>Arrastre o seleccione los archivos Excel</h3>
-          <p class="hint">Formatos permitidos: <strong>.xlsx / .xls</strong></p>
+          <p class="hint">Formatos permitidos: <strong>.xlsx / .xls</strong> por ente.</p>
         </div>
         <input type="file" id="fileInput" name="files" multiple accept=".xlsx,.xls" hidden>
       </div>
     </form>
 
-    <!-- Estado del proceso -->
     <div id="uploadStatus" class="upload-status" hidden>
       <div class="spinner"></div>
       <p>Analizando archivos, espere por favor...</p>
     </div>
 
-    <!-- Resultado -->
     <div id="uploadResult" class="upload-result" hidden>
       <h4>Resultado del análisis</h4>
       <p id="resultMessage"></p>
       <a href="{{ url_for('reporte_por_ente') }}" class="btn btn-primary">Ver Reporte General</a>
     </div>
   </section>
-
 </div>
 {% endblock %}
-
