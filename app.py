@@ -36,14 +36,14 @@ from pathlib import Path
 import config
 from logging.handlers import RotatingFileHandler
 
-log_dir = Path('log')
+log_dir = Path('logs')
 log_dir.mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     handlers=[
-        RotatingFileHandler('log/app.log', maxBytes=10*1024*1024, backupCount=10),
+        RotatingFileHandler('logs/app.log', maxBytes=10*1024*1024, backupCount=10),
         logging.StreamHandler()
     ]
 )
@@ -53,7 +53,7 @@ log = logging.getLogger("SCIL")
 # Configuración
 # -----------------------------------------------------------
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "ofs_sasp_2025")
+app.secret_key = os.environ.get("SECRET_KEY")
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_CONTENT_LENGTH", 50 * 1024 * 1024))
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -74,7 +74,7 @@ app.add_template_filter(ordenar_quincenas, "ordenar_quincenas")
 # -----------------------------------------------------------
 @app.before_request
 def verificar_autenticacion():
-    libres = {"login", "static"}
+    libres = {"login", "static", "health_check"}
     if request.endpoint not in libres and not session.get("autenticado"):
         if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
             return jsonify({"error": "Sesión expirada o no autorizada"}), 403
@@ -90,6 +90,15 @@ def manejar_archivo_muy_grande(_error):
     if request.is_json or request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return jsonify({"error": msg}), 413
     return msg, 413
+
+# -----------------------------------------------------------
+# HEALTHCHECK
+# -----------------------------------------------------------
+@app.route("/api/health")
+@app.route("/health")
+def health_check():
+    return jsonify({"status": "ok", "service": "sasp"}), 200
+
 
 # -----------------------------------------------------------
 # LOGIN / LOGOUT
@@ -136,7 +145,7 @@ def logout():
     usuario = session.get("usuario")
     session.clear()
     log.info("Logout usuario=%s", usuario)
-    return redirect(url_for("login"))
+    return redirect("http://192.168.1.248/SIFEET-2025/")
 
 # -----------------------------------------------------------
 # DASHBOARD
@@ -195,6 +204,23 @@ def _es_usuario_validador():
     return session.get("usuario", "").strip().lower() == "luis"
 
 
+AMBITOS_REPORTE = {"estatales", "municipios", "mixtos"}
+AMBITO_RFC_LABELS = {
+    "estatales": "Estatales",
+    "municipios": "Municipales",
+    "mixtos": "Mixtos estado-municipio",
+}
+
+
+def _normalizar_ambito(ambito_sel):
+    ambito = str(ambito_sel or "").strip().lower()
+    return ambito if ambito in AMBITOS_REPORTE else "estatales"
+
+
+def _ambito_rfc_label(ambito):
+    return AMBITO_RFC_LABELS.get(ambito, "Sin clasificar")
+
+
 def _tipo_ente(ente_clave):
     ref = _sanitize_text(ente_clave)
     cache = _entes_cache()
@@ -211,6 +237,8 @@ def _coincide_ambito(ambito_sel, tipo_ente):
     tipo = (tipo_ente or "ENTE").upper()
     if ambito_sel == "municipios":
         return "MUNIC" in tipo
+    if ambito_sel == "mixtos":
+        return True
     return "MUNIC" not in tipo
 
 
@@ -248,6 +276,103 @@ def _filtrar_duplicados_con_visibilidad(resultados):
         r2["entes"] = entes_visibles
         out.append(r2)
     return out
+
+
+def _clasificar_resultado_ambito(resultado, entes_usuario, modo_permiso):
+    entes_visibles = []
+    for ente in (resultado.get("entes") or []):
+        ente_txt = str(ente).strip()
+        if ente_txt and _puede_ver_ente(ente_txt, entes_usuario, modo_permiso):
+            entes_visibles.append(ente_txt)
+
+    entes_visibles = sorted(set(entes_visibles))
+    entes_estatales = [e for e in entes_visibles if _coincide_ambito("estatales", _tipo_ente(e))]
+    entes_municipales = [e for e in entes_visibles if _coincide_ambito("municipios", _tipo_ente(e))]
+
+    categoria = None
+    entes_ambito = []
+    if entes_estatales and entes_municipales:
+        categoria = "mixtos"
+        entes_ambito = entes_visibles
+    elif len(entes_estatales) >= 2:
+        categoria = "estatales"
+        entes_ambito = entes_estatales
+    elif len(entes_municipales) >= 2:
+        categoria = "municipios"
+        entes_ambito = entes_municipales
+
+    return {
+        "categoria": categoria,
+        "visibles": entes_visibles,
+        "estatales": entes_estatales,
+        "municipios": entes_municipales,
+        "entes_ambito": entes_ambito,
+    }
+
+
+def _resumen_duplicidad_por_ambito(resultados, entes_usuario, modo_permiso, filtro_ente=""):
+    rfcs_por_ambito = {ambito: set() for ambito in sorted(AMBITOS_REPORTE)}
+    entes_por_ambito = {ambito: set() for ambito in sorted(AMBITOS_REPORTE)}
+    ambito_por_rfc = {}
+
+    for resultado in resultados:
+        info_ambito = _clasificar_resultado_ambito(resultado, entes_usuario, modo_permiso)
+        categoria = info_ambito["categoria"]
+        if not categoria:
+            continue
+
+        entes_ambito = info_ambito["entes_ambito"]
+        if filtro_ente and not any(_ente_display(ente) == filtro_ente for ente in entes_ambito):
+            continue
+
+        rfc = str(resultado.get("rfc", "")).strip().upper()
+        if rfc:
+            rfcs_por_ambito[categoria].add(rfc)
+            ambito_por_rfc[rfc] = categoria
+
+        for ente in entes_ambito:
+            entes_por_ambito[categoria].add(_ente_display(ente))
+
+    conteos = {ambito: len(rfcs) for ambito, rfcs in rfcs_por_ambito.items()}
+    return {
+        "rfcs_por_ambito": rfcs_por_ambito,
+        "entes_por_ambito": entes_por_ambito,
+        "ambito_por_rfc": ambito_por_rfc,
+        "conteos": conteos,
+        "total_general": sum(conteos.values()),
+    }
+
+
+def _indexar_catalogo(catalogo):
+    index = {}
+    for ente in catalogo:
+        for valor in (ente.get("clave"), ente.get("siglas"), ente.get("nombre")):
+            clave = _sanitize_text(valor)
+            if clave:
+                index[clave] = ente
+    return index
+
+
+def _asegurar_ente_info(entes_info, ente_ref, trabajadores_por_ente_map, catalogo_index):
+    display = _ente_display(ente_ref)
+    if display in entes_info:
+        return display
+
+    meta = catalogo_index.get(_sanitize_text(ente_ref)) or {}
+    clave = meta.get("clave") or db_manager.normalizar_ente_clave(ente_ref) or ente_ref
+    entes_info[display] = {
+        "num": meta.get("num"),
+        "siglas": meta.get("siglas") or display,
+        "nombre_completo": meta.get("nombre") or display,
+        "total": trabajadores_por_ente_map.get(clave, 0),
+        "duplicados": 0,
+        "tipo": str(meta.get("ambito") or _tipo_ente(ente_ref)).upper(),
+    }
+    return display
+
+
+def _ambito_ente_origen(ente_ref):
+    return "Municipal" if _coincide_ambito("municipios", _tipo_ente(ente_ref)) else "Estatal"
 
 
 def _resolver_texto_solventacion(pre, solv, fallback=""):
@@ -291,6 +416,9 @@ def _construir_detalle_solventados(resultados, filtro_ente, ambito_sel, entes_us
     for r in resultados:
         rfc_actual = str(r.get("rfc", "")).strip().upper()
         mapa_pre = prevalidaciones_por_rfc.get(rfc_actual, {})
+        info_ambito = _clasificar_resultado_ambito(r, entes_usuario, modo_permiso)
+        if info_ambito["categoria"] != ambito_sel:
+            continue
         monto_por_ente = {}
         for reg in (r.get("registros") or []):
             ente_reg = reg.get("ente")
@@ -299,10 +427,8 @@ def _construir_detalle_solventados(resultados, filtro_ente, ambito_sel, entes_us
                 continue
             monto_por_ente[ente_key] = monto_por_ente.get(ente_key, 0.0) + _monto_num(reg.get("monto"))
 
-        for ente_clave in (r.get("entes") or []):
+        for ente_clave in info_ambito["entes_ambito"]:
             if not _puede_ver_ente(ente_clave, entes_usuario, modo_permiso):
-                continue
-            if not _coincide_ambito(ambito_sel, _tipo_ente(ente_clave)):
                 continue
 
             display = _ente_display(ente_clave)
@@ -384,9 +510,7 @@ def _build_validacion_error_message(exc, accion):
 @app.route("/resultados")
 def reporte_por_ente():
     filtro_ente = request.args.get("ente", "").strip()
-    ambito_sel = request.args.get("ambito", "estatales").strip().lower()
-    if ambito_sel not in {"estatales", "municipios"}:
-        ambito_sel = "estatales"
+    ambito_sel = _normalizar_ambito(request.args.get("ambito", "estatales"))
 
     validacion_error = request.args.get("validacion_error", "") == "1"
     validacion_error_msg = ""
@@ -409,29 +533,32 @@ def reporte_por_ente():
     trabajadores_por_ente_map = db_manager.contar_trabajadores_por_ente()
     trabajadores_detallados = db_manager.obtener_trabajadores_por_ente()
     catalogo = db_manager.listar_entes() + db_manager.listar_municipios()
+    catalogo_index = _indexar_catalogo(catalogo)
+    resumen_ambitos = _resumen_duplicidad_por_ambito(resultados, entes_usuario, modo_permiso, filtro_ente=filtro_ente)
 
     agrupado = {}
     entes_info = {}
 
-    for ente in catalogo:
-        display = ente.get("siglas") or ente.get("nombre")
-        clave = ente.get("clave")
-        tipo = str(ente.get("ambito") or "ENTE").upper()
+    if ambito_sel != "mixtos":
+        for ente in catalogo:
+            display = ente.get("siglas") or ente.get("nombre")
+            clave = ente.get("clave")
+            tipo = str(ente.get("ambito") or "ENTE").upper()
 
-        if not _puede_ver_ente(clave, entes_usuario, modo_permiso):
-            continue
-        if not _coincide_ambito(ambito_sel, tipo):
-            continue
+            if not _puede_ver_ente(clave, entes_usuario, modo_permiso):
+                continue
+            if not _coincide_ambito(ambito_sel, tipo):
+                continue
 
-        agrupado.setdefault(display, [])
-        entes_info[display] = {
-            "num": ente.get("num"),
-            "siglas": ente.get("siglas"),
-            "nombre_completo": ente.get("nombre"),
-            "total": trabajadores_por_ente_map.get(clave, 0),
-            "duplicados": 0,
-            "tipo": tipo,
-        }
+            agrupado.setdefault(display, [])
+            entes_info[display] = {
+                "num": ente.get("num"),
+                "siglas": ente.get("siglas"),
+                "nombre_completo": ente.get("nombre"),
+                "total": trabajadores_por_ente_map.get(clave, 0),
+                "duplicados": 0,
+                "tipo": tipo,
+            }
 
     resumen_prevalidacion = {"rfc_solventados": 0, "registros_solventados": 0}
     detalle_solventados = []
@@ -453,23 +580,27 @@ def reporte_por_ente():
             rfc_actual = str(r.get("rfc", "")).strip().upper()
             mapa_solvs = solventaciones_por_rfc.get(rfc_actual, {})
             mapa_pre = prevalidaciones_por_rfc.get(rfc_actual, {})
+            info_ambito = _clasificar_resultado_ambito(r, entes_usuario, modo_permiso)
+            if info_ambito["categoria"] != ambito_sel:
+                continue
 
-            for ente_clave in (r.get("entes") or []):
+            for ente_clave in info_ambito["entes_ambito"]:
                 if not es_luis and _es_prevalidado_oculto(mapa_pre, ente_clave):
                     continue
                 if not _puede_ver_ente(ente_clave, entes_usuario, modo_permiso):
-                    continue
-                if not _coincide_ambito(ambito_sel, _tipo_ente(ente_clave)):
                     continue
 
                 display = _ente_display(ente_clave)
                 if filtro_ente and display != filtro_ente:
                     continue
+                if ambito_sel == "mixtos":
+                    _asegurar_ente_info(entes_info, ente_clave, trabajadores_por_ente_map, catalogo_index)
+                    agrupado.setdefault(display, [])
                 if display not in entes_info:
                     continue
 
                 otros_entes = []
-                for e in (r.get("entes") or []):
+                for e in info_ambito["entes_ambito"]:
                     if _sanitize_text(e) != _sanitize_text(ente_clave):
                         s = _ente_sigla(e)
                         if s not in otros_entes:
@@ -477,7 +608,7 @@ def reporte_por_ente():
 
                 estado_default = r.get("estado", "Sin valoración")
                 estado_entes = {}
-                for en in (r.get("entes") or []):
+                for en in info_ambito["entes_ambito"]:
                     clave_norm = db_manager.normalizar_ente_clave(en) or en
                     estado_entes[_ente_sigla(en)] = (mapa_solvs.get(clave_norm) or {}).get("estado", estado_default)
 
@@ -541,10 +672,12 @@ def reporte_por_ente():
     for ente_clave, trabajadores in trabajadores_detallados.items():
         if not _puede_ver_ente(str(ente_clave), entes_usuario, modo_permiso):
             continue
-        if not _coincide_ambito(ambito_sel, _tipo_ente(str(ente_clave))):
+        if ambito_sel != "mixtos" and not _coincide_ambito(ambito_sel, _tipo_ente(str(ente_clave))):
             continue
 
         display = _ente_display(str(ente_clave))
+        if ambito_sel == "mixtos" and display not in entes_info:
+            continue
         if filtro_ente and display != filtro_ente:
             continue
 
@@ -555,40 +688,21 @@ def reporte_por_ente():
                 rfc_procesados.add(rfc)
             registros_cargados += 1
 
-    rfc_duplicados = set()
-    for r in resultados:
-        entes_visibles = []
-        for ente_cruce in (r.get("entes") or []):
-            if _puede_ver_ente(str(ente_cruce), entes_usuario, modo_permiso):
-                if not _coincide_ambito(ambito_sel, _tipo_ente(str(ente_cruce))):
-                    continue
-                entes_visibles.append(str(ente_cruce))
-        entes_visibles = sorted(set(entes_visibles))
-        if len(entes_visibles) < 2:
-            continue
-
-        if filtro_ente:
-            if not any(_ente_display(e) == filtro_ente for e in entes_visibles):
-                continue
-
-        rfc = str(r.get("rfc", "")).strip().upper()
-        if rfc:
-            rfc_duplicados.add(rfc)
-
     entes_visibles = sum(1 for nombre in entes_info_ordenado if (not filtro_ente or nombre == filtro_ente))
     trabajadores_procesados = len(rfc_procesados)
-    duplicados_detectados = len(rfc_duplicados)
+    conteos_ambito = resumen_ambitos["conteos"]
+    duplicados_detectados = conteos_ambito.get(ambito_sel, 0)
     indice_duplicidad = round((duplicados_detectados / trabajadores_procesados) * 100, 2) if trabajadores_procesados else 0.0
-    entes_con_duplicidad = sum(
-        1
-        for nombre, info in entes_info_ordenado.items()
-        if (not filtro_ente or nombre == filtro_ente) and int(info.get("duplicados", 0)) > 0
-    )
+    entes_con_duplicidad = len(resumen_ambitos["entes_por_ambito"].get(ambito_sel, set()))
 
     resumen_auditoria = [
         {"m": "Entes analizados", "v": str(entes_visibles)},
         {"m": "Trabajadores analizados (RFC únicos)", "v": f"{trabajadores_procesados:,}"},
-        {"m": "Casos de duplicidad (RFC únicos)", "v": str(duplicados_detectados)},
+        {"m": f"Casos de duplicidad ({_ambito_rfc_label(ambito_sel)} - RFC únicos)", "v": str(duplicados_detectados)},
+        {"m": "Casos estatales (RFC únicos)", "v": str(conteos_ambito.get("estatales", 0))},
+        {"m": "Casos municipales (RFC únicos)", "v": str(conteos_ambito.get("municipios", 0))},
+        {"m": "Casos mixtos estado-municipio (RFC únicos)", "v": str(conteos_ambito.get("mixtos", 0))},
+        {"m": "Total general de duplicidad (RFC únicos)", "v": str(resumen_ambitos["total_general"])},
         {"m": "Entes con duplicidad", "v": str(entes_con_duplicidad)},
         {"m": "Índice de trabajadores duplicados", "v": f"{indice_duplicidad:.2f}%"},
     ]
@@ -840,10 +954,17 @@ def exportar_por_ente():
             if _ente_display(ente) == ente_sel and _puede_ver_ente(ente, entes_usuario, modo_permiso):
                 permitidos.append(r)
                 break
+    resumen_ambitos = _resumen_duplicidad_por_ambito(permitidos, entes_usuario, modo_permiso)
+    ambito_por_rfc = resumen_ambitos["ambito_por_rfc"]
     filas = _construir_filas_export(permitidos)
 
     # Filtrar registros con N/A en Quincenas (sin intersección temporal)
     filas = [f for f in filas if f.get("Quincenas") != "N/A"]
+
+    for fila in filas:
+        rfc = str(fila.get("RFC", "")).strip().upper()
+        fila["Ámbito RFC"] = _ambito_rfc_label(ambito_por_rfc.get(rfc))
+        fila["Ámbito Ente Origen"] = _ambito_ente_origen(fila.get("Ente Origen", ""))
 
     # Filtrar por ente seleccionado
     filas = [f for f in filas if _ente_match(ente_sel, [f["Ente Origen"]])]
@@ -858,7 +979,8 @@ def exportar_por_ente():
 
     columnas_export = [
         "RFC", "Nombre", "Puesto", "Fecha Alta", "Fecha Baja",
-        "Ente Origen", "Entes Incompatibilidad", "Quincenas", "Estatus", "Solventación"
+        "Ente Origen", "Ámbito Ente Origen", "Ámbito RFC",
+        "Entes Incompatibilidad", "Quincenas", "Estatus", "Solventación"
     ]
     if es_luis:
         columnas_export.append("Total Percepciones")
@@ -897,6 +1019,8 @@ def exportar_excel_general():
         if es_luis else _filtrar_duplicados_con_visibilidad(resultados_base)
     )
     filas = _construir_filas_export(resultados)
+    resumen_ambitos = _resumen_duplicidad_por_ambito(resultados, entes_usuario, modo_permiso)
+    ambito_por_rfc = resumen_ambitos["ambito_por_rfc"]
 
     # Filtrar registros con N/A en Quincenas (sin intersección temporal)
     filas = [f for f in filas if f.get("Quincenas") != "N/A"]
@@ -937,6 +1061,11 @@ def exportar_excel_general():
 
         filas = filas_visibles
 
+    for fila in filas:
+        rfc = str(fila.get("RFC", "")).strip().upper()
+        fila["Ámbito RFC"] = _ambito_rfc_label(ambito_por_rfc.get(rfc))
+        fila["Ámbito Ente Origen"] = _ambito_ente_origen(fila.get("Ente Origen", ""))
+
     if not filas:
         return jsonify({"error": "Sin datos para exportar."}), 404
 
@@ -948,7 +1077,8 @@ def exportar_excel_general():
 
     columnas_export = [
         "RFC", "Nombre", "Puesto", "Fecha Alta", "Fecha Baja",
-        "Ente Origen", "Entes Incompatibilidad", "Quincenas", "Estatus", "Solventación"
+        "Ente Origen", "Ámbito Ente Origen", "Ámbito RFC",
+        "Entes Incompatibilidad", "Quincenas", "Estatus", "Solventación"
     ]
     if es_luis:
         columnas_export.append("Total Percepciones")
@@ -966,10 +1096,18 @@ def exportar_excel_general():
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="Duplicidades_Generales")
+        resumen_metricas = pd.DataFrame([
+            {"Metrica": "Casos de duplicidad estatales (RFC unicos)", "Valor": resumen_ambitos["conteos"].get("estatales", 0)},
+            {"Metrica": "Casos de duplicidad municipales (RFC unicos)", "Valor": resumen_ambitos["conteos"].get("municipios", 0)},
+            {"Metrica": "Casos de duplicidad mixtos estado-municipio (RFC unicos)", "Valor": resumen_ambitos["conteos"].get("mixtos", 0)},
+            {"Metrica": "Total general de duplicidad (RFC unicos)", "Valor": resumen_ambitos["total_general"]},
+        ])
+        resumen_metricas.to_excel(writer, index=False, sheet_name="Resumen_Metricas")
         resumen = (
-            df.groupby("Ente Origen").agg(Total_RFCs=("RFC", "nunique"))
-              .reset_index().sort_values("Ente Origen")
+            df.groupby(["Ámbito Ente Origen", "Ente Origen"]).agg(RFC_unicos_ente=("RFC", "nunique"))
+              .reset_index().sort_values(["Ámbito Ente Origen", "Ente Origen"])
         )
+        resumen["Nota"] = "No sumable entre entes; usa Resumen_Metricas."
         resumen.to_excel(writer, index=False, sheet_name="Resumen_por_Ente")
 
     output.seek(0)
@@ -982,11 +1120,11 @@ def exportar_solventados():
         return "No autorizado", 403
 
     filtro_ente = request.args.get("ente", "").strip()
-    ambito_sel = request.args.get("ambito", "estatales").strip().lower()
-    if ambito_sel not in {"estatales", "municipios"}:
-        ambito_sel = "estatales"
+    ambito_sel = _normalizar_ambito(request.args.get("ambito", "estatales"))
 
     resultados = _filtrar_duplicados_reales(db_manager.obtener_cruces_reales())
+    resumen_ambitos = _resumen_duplicidad_por_ambito(resultados, [], "ALL")
+    ambito_por_rfc = resumen_ambitos["ambito_por_rfc"]
     filas_general = _construir_filas_export(resultados)
     filas_general = [f for f in filas_general if f.get("Quincenas") != "N/A"]
 
@@ -1005,7 +1143,7 @@ def exportar_solventados():
             continue
         if filtro_ente and ente_origen != filtro_ente:
             continue
-        if not _coincide_ambito(ambito_sel, _tipo_ente(ente_origen)):
+        if ambito_por_rfc.get(rfc) != ambito_sel:
             continue
 
         ente_clave = db_manager.normalizar_ente_clave(ente_origen) or ente_origen
@@ -1019,6 +1157,7 @@ def exportar_solventados():
             "Nombre": fila.get("Nombre", ""),
             "Puesto": fila.get("Puesto", ""),
             "Ente Origen": fila.get("Ente Origen", ""),
+            "Ámbito RFC": _ambito_rfc_label(ambito_por_rfc.get(rfc)),
             "Fecha Alta": fila.get("Fecha Alta", ""),
             "Fecha Baja": fila.get("Fecha Baja", ""),
             "Total Percepciones Anual": fila.get("Total Percepciones", ""),
@@ -1033,6 +1172,7 @@ def exportar_solventados():
         "Nombre",
         "Puesto",
         "Ente Origen",
+        "Ámbito RFC",
         "Entes Incompatibilidad",
         "Fecha Alta",
         "Fecha Baja",

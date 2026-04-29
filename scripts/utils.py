@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import sys
 import unicodedata
 from collections import defaultdict
 from datetime import date, datetime
@@ -14,6 +15,12 @@ from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
+
+WORKSPACE_ROOT = Path(__file__).resolve().parents[2]
+if str(WORKSPACE_ROOT) not in sys.path:
+    sys.path.insert(0, str(WORKSPACE_ROOT))
+
+from shared_user_catalog import get_project_entes, list_users
 
 _ENTE_ALIAS_MAP = {
     "SM": "SMYT",
@@ -188,10 +195,52 @@ class DatabaseManager:
         self._migrate_workflow_defaults(cur)
         self._migrate_entes_siglas(cur)
         self._migrate_catalogos_mayusculas(cur)
+        self._sync_catalog_users(cur)
 
         conn.commit()
         conn.close()
         print(f"✅ Tablas listas en {self.db_path}")
+
+    def _sync_catalog_users(self, cur):
+        for catalog_user in list_users():
+            username = str(catalog_user.get("usuario") or "").strip().lower()
+            password = str(catalog_user.get("clave") or "").strip()
+            display_name = str(catalog_user.get("nombre_completo") or username).strip()
+            if not username or not password:
+                continue
+
+            entes = get_project_entes(catalog_user, "05-sasp")
+            entes_text = ",".join(entes or ["TODOS"])
+            password_hash = hashlib.sha256(password.encode()).hexdigest()
+
+            cur.execute(
+                """
+                SELECT id
+                FROM usuarios
+                WHERE LOWER(usuario)=LOWER(?)
+                LIMIT 1
+                """,
+                (username,),
+            )
+            row = cur.fetchone()
+
+            if row:
+                cur.execute(
+                    """
+                    UPDATE usuarios
+                    SET nombre=?, clave=?, entes=?
+                    WHERE id=?
+                    """,
+                    (display_name, password_hash, entes_text, row["id"]),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO usuarios (nombre, usuario, clave, entes)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (display_name, username, password_hash, entes_text),
+                )
 
     def _migrate_solventaciones_columns(self, cur):
         """Agrega columnas catalogo y otro_texto a solventaciones si no existen"""

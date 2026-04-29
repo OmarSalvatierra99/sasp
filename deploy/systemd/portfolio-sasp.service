@@ -1,5 +1,5 @@
 [Unit]
-Description=sasp Portfolio Flask Application
+Description=SASP — Sistema de Auditoría de Servicios Personales
 After=network.target
 
 [Service]
@@ -7,15 +7,13 @@ Type=simple
 User=gabo
 Group=gabo
 WorkingDirectory=/home/gabo/portfolio/projects/05-sasp
-Environment=PYTHONUNBUFFERED=1
-Environment=SCIL_DB=/home/gabo/portfolio/projects/05-sasp/scil.db
-EnvironmentFile=-/etc/default/portfolio-sasp
+EnvironmentFile=/etc/default/portfolio-sasp
 ExecStart=/home/gabo/portfolio/projects/05-sasp/venv/bin/gunicorn \
     --workers 2 \
-    --bind 127.0.0.1:5004 \
+    --bind 127.0.0.1:${PORT} \
     --timeout 120 \
-    --access-logfile - \
-    --error-logfile - \
+    --access-logfile logs/gunicorn-access.log \
+    --error-logfile logs/gunicorn-error.log \
     app:app
 Restart=on-failure
 RestartSec=5

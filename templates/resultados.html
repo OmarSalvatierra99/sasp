@@ -130,17 +130,33 @@
     <a class="tab-link {% if (ambito_sel or 'estatales') == 'municipios' %}active{% endif %}" href="{{ url_for('reporte_por_ente', ambito='municipios') }}">
       Municipios
     </a>
+    <a class="tab-link {% if (ambito_sel or 'estatales') == 'mixtos' %}active{% endif %}" href="{{ url_for('reporte_por_ente', ambito='mixtos') }}">
+      Mixtos
+    </a>
   </div>
 
   <div class="export-bar">
     <form id="filterForm" method="get" class="form-inline" action="{{ url_for('reporte_por_ente') }}">
       <input type="hidden" name="ambito" value="{{ ambito_sel or 'estatales' }}">
       <label for="selectEnte">
-        Filtrar por {% if (ambito_sel or 'estatales') == 'municipios' %}municipio{% else %}ente estatal{% endif %}:
+        Filtrar por
+        {% if (ambito_sel or 'estatales') == 'municipios' %}
+          municipio
+        {% elif (ambito_sel or 'estatales') == 'mixtos' %}
+          ente o municipio
+        {% else %}
+          ente estatal
+        {% endif %}:
       </label>
       <select name="ente" id="selectEnte">
         <option value="">
-          {% if (ambito_sel or 'estatales') == 'municipios' %}Todos los municipios{% else %}Todos los entes estatales{% endif %}
+          {% if (ambito_sel or 'estatales') == 'municipios' %}
+            Todos los municipios
+          {% elif (ambito_sel or 'estatales') == 'mixtos' %}
+            Todos los entes y municipios con cruce mixto
+          {% else %}
+            Todos los entes estatales
+          {% endif %}
         </option>
         {% for ente_nombre, info in entes_info.items() %}
           <option value="{{ ente_nombre }}" {% if filtro_ente == ente_nombre %}selected{% endif %}>{{ ente_nombre }}</option>
